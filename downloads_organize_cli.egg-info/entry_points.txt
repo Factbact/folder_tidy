@@ -1,0 +1,3 @@
+[console_scripts]
+downloads-organize = downloads_organize.cli:main
+downloads-organize-gui = downloads_organize.gui:main

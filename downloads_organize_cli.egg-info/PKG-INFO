@@ -1,0 +1,79 @@
+Metadata-Version: 2.4
+Name: downloads-organize-cli
+Version: 0.1.0
+Summary: Folder Tidy style organizer CLI for source/destination folders
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+
+# downloads-organize
+
+Folder Tidy style organizer CLI for macOS-like workflows.
+
+## What It Supports
+
+- `tidy` with default dry-run and `--apply` for real moves
+- Source/Destination split (`--source`, `--destination`)
+- 22 built-in rules (with `folders` and `aliases` default off)
+- Configurable custom rules with predicate-like conditions
+- Ignore controls (`extensions`, `paths`, aliases/folders/tagged)
+- Collision-safe destination naming (`name (1).ext`)
+- Undo history (`undo`, `undo-list`, `undo-delete`)
+
+## Quick Start
+
+```bash
+python3 -m downloads_organize tidy --source ~/Downloads --destination ~/TidyBox
+python3 -m downloads_organize tidy --source ~/Downloads --destination ~/TidyBox --apply
+python3 -m downloads_organize undo-list
+python3 -m downloads_organize undo --apply
+```
+
+## Commands
+
+- `tidy`: organize files using enabled rules
+- `rules-list`: print effective rule list
+- `undo-list`: list transaction history
+- `undo`: restore latest pending transaction (or `--id <tx_id>`)
+- `undo-delete`: delete history entries (`--id` or `--older-than-days`)
+
+## Config (TOML)
+
+```toml
+[rules]
+disable = ["screenshots"]
+order = ["custom_recent_shots", "pdf_documents", "word_documents"]
+
+[extension_rules]
+code = [".log"]
+
+[ignore]
+extensions = [".crdownload", ".part"]
+paths = ["Thumbs.db", "source/.DS_Store"]
+aliases = true
+folders = false
+tagged = false
+
+[options]
+include_subfolders = true
+skip_bundles = true
+remove_empty_folders = true
+create_dated_top_folder = false
+
+[custom_rules.recent_shots]
+description = "Screenshots from the last 2 weeks"
+subfolder = "Recent Screenshots"
+mode = "all"
+enabled = true
+kind = "image_png"
+name_contains = "screenshot"
+created_within_days = 14
+```
+
+Condition keys for custom rules:
+
+- `kind`
+- `name_contains`
+- `created_within_days`
+- `size_gte`
+- `size_lte`
+- `extensions`

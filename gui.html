@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Downloads Organizer</title>
+    <style>
+        :root {
+            --bg-primary: #1a1a2e;
+            --bg-secondary: #16213e;
+            --bg-card: #0f3460;
+            --accent: #e94560;
+            --accent-hover: #ff6b6b;
+            --text-primary: #eaeaea;
+            --text-secondary: #a0a0a0;
+            --success: #00d9a5;
+            --warning: #ffa502;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
+            min-height: 100vh;
+            color: var(--text-primary);
+            padding: 40px 20px;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg, var(--accent), var(--accent-hover));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: var(--text-secondary);
+            margin-bottom: 40px;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+        }
+
+        .card-title {
+            font-size: 1.1rem;
+            color: var(--text-secondary);
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .card-title::before {
+            content: '';
+            width: 4px;
+            height: 20px;
+            background: var(--accent);
+            border-radius: 2px;
+        }
+
+        .folder-path {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .folder-input {
+            flex: 1;
+            padding: 14px 18px;
+            border: 2px solid transparent;
+            border-radius: 10px;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            font-size: 1rem;
+            transition: all 0.3s;
+        }
+
+        .folder-input:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        .btn {
+            padding: 14px 28px;
+            border: none;
+            border-radius: 10px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-secondary {
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+        }
+
+        .btn-secondary:hover {
+            background: var(--bg-primary);
+            transform: translateY(-2px);
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(233, 69, 96, 0.4);
+        }
+
+        .rules-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 12px;
+        }
+
+        .rule-item {
+            background: var(--bg-secondary);
+            padding: 12px 16px;
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .rule-category {
+            font-weight: 600;
+            color: var(--accent-hover);
+        }
+
+        .rule-extensions {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+
+        .preview-area {
+            background: var(--bg-secondary);
+            border-radius: 10px;
+            padding: 16px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: 'Menlo', 'Monaco', monospace;
+            font-size: 0.9rem;
+            line-height: 1.6;
+        }
+
+        .preview-item {
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .preview-item:last-child {
+            border-bottom: none;
+        }
+
+        .preview-item.move {
+            color: var(--success);
+        }
+
+        .preview-item.skip {
+            color: var(--text-secondary);
+        }
+
+        .arrow {
+            color: var(--accent);
+        }
+
+        .button-row {
+            display: flex;
+            gap: 12px;
+            justify-content: center;
+            margin-top: 20px;
+        }
+
+        .status-bar {
+            text-align: center;
+            padding: 16px;
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+        }
+
+        .status-bar.success {
+            color: var(--success);
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-secondary);
+        }
+
+        .empty-state-icon {
+            font-size: 3rem;
+            margin-bottom: 16px;
+        }
+
+        /* Scrollbar styling */
+        .preview-area::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .preview-area::-webkit-scrollbar-track {
+            background: var(--bg-primary);
+            border-radius: 4px;
+        }
+
+        .preview-area::-webkit-scrollbar-thumb {
+            background: var(--accent);
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📁 Downloads Organizer</h1>
+        <p class="subtitle">ダウンロードフォルダのファイルを自動整理</p>
+
+        <div class="card">
+            <div class="card-title">対象フォルダ</div>
+            <div class="folder-path">
+                <input type="text" class="folder-input" id="folderPath" value="~/Downloads" readonly>
+                <button class="btn btn-secondary" onclick="browseFolder()">選択...</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">整理ルール</div>
+            <div class="rules-grid" id="rulesGrid">
+                <!-- Rules will be populated by JavaScript -->
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">プレビュー</div>
+            <div class="preview-area" id="previewArea">
+                <div class="empty-state">
+                    <div class="empty-state-icon">📋</div>
+                    <p>「プレビュー」ボタンをクリックして<br>整理されるファイルを確認</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="button-row">
+            <button class="btn btn-secondary" onclick="runPreview()">🔍 プレビュー</button>
+            <button class="btn btn-primary" onclick="runOrganize()">✨ 整理を実行</button>
+        </div>
+
+        <div class="status-bar" id="statusBar">準備完了</div>
+    </div>
+
+    <script>
+        // Default rules
+        const DEFAULT_RULES = {
+            "Documents": [".pdf", ".doc", ".docx", ".txt", ".rtf", ".md"],
+            "Spreadsheets": [".xls", ".xlsx", ".csv"],
+            "Presentations": [".ppt", ".pptx"],
+            "Images": [".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".bmp", ".svg"],
+            "Videos": [".mp4", ".mov", ".mkv", ".avi", ".wmv", ".webm"],
+            "Audio": [".mp3", ".wav", ".m4a", ".aac", ".flac"],
+            "Archives": [".zip", ".rar", ".7z", ".tar", ".gz", ".tar.gz", ".tgz"],
+            "Installers": [".dmg", ".pkg", ".msi", ".exe"]
+        };
+
+        // Populate rules grid
+        function populateRules() {
+            const grid = document.getElementById('rulesGrid');
+            grid.innerHTML = '';
+            
+            for (const [category, extensions] of Object.entries(DEFAULT_RULES)) {
+                const item = document.createElement('div');
+                item.className = 'rule-item';
+                item.innerHTML = `
+                    <span class="rule-category">${category}</span>
+                    <span class="rule-extensions">${extensions.join(', ')}</span>
+                `;
+                grid.appendChild(item);
+            }
+        }
+
+        function browseFolder() {
+            alert('この機能はWebブラウザでは制限されています。\n\nターミナルで以下のコマンドを使用してください:\n\npython3 downloads_organize/gui.py\n\nまたは直接CLIを使用:\n\ndownloads-organize --apply');
+        }
+
+        function runPreview() {
+            const statusBar = document.getElementById('statusBar');
+            const previewArea = document.getElementById('previewArea');
+            
+            statusBar.textContent = 'プレビュー中...';
+            statusBar.className = 'status-bar';
+            
+            // Simulated preview
+            previewArea.innerHTML = `
+                <div class="preview-item move">sample.pdf <span class="arrow">→</span> Documents/</div>
+                <div class="preview-item move">photo.jpg <span class="arrow">→</span> Images/</div>
+                <div class="preview-item move">video.mp4 <span class="arrow">→</span> Videos/</div>
+                <div class="preview-item move">archive.zip <span class="arrow">→</span> Archives/</div>
+                <div class="preview-item skip">readme.txt <span class="arrow">→</span> Documents/</div>
+            `;
+            
+            statusBar.textContent = 'プレビュー完了: 5件の移動予定';
+            statusBar.className = 'status-bar success';
+            
+            alert('これはデモプレビューです。\n\n実際にファイルを整理するには、ターミナルで以下を実行してください:\n\ncd "' + document.getElementById('folderPath').value + '"\npython3 -c "from downloads_organize.cli import main; main()"');
+        }
+
+        function runOrganize() {
+            const confirmed = confirm('ファイルを整理しますか？\n\nこの操作はファイルを移動します。');
+            
+            if (confirmed) {
+                alert('実際にファイルを整理するには、ターミナルで以下を実行してください:\n\ndownloads-organize --apply\n\nまたは:\n\npython3 -m downloads_organize.cli --apply');
+            }
+        }
+
+        // Initialize
+        populateRules();
+    </script>
+</body>
+</html>

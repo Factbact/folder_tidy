@@ -1,0 +1,12 @@
+README.md
+pyproject.toml
+downloads_organize/__init__.py
+downloads_organize/__main__.py
+downloads_organize/cli.py
+downloads_organize/gui.py
+downloads_organize_cli.egg-info/PKG-INFO
+downloads_organize_cli.egg-info/SOURCES.txt
+downloads_organize_cli.egg-info/dependency_links.txt
+downloads_organize_cli.egg-info/entry_points.txt
+downloads_organize_cli.egg-info/top_level.txt
+tests/test_cli.py

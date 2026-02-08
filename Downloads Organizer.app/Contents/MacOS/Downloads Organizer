@@ -1,0 +1,160 @@
+#!/usr/bin/osascript
+
+-- Downloads Organizer - Pure AppleScript App
+-- Organizes files in Downloads folder and supports undo
+
+property defaultRules : {¬
+    {category:"Documents", extensions:{".pdf", ".doc", ".docx", ".txt", ".rtf", ".md"}}, ¬
+    {category:"Spreadsheets", extensions:{".xls", ".xlsx", ".csv"}}, ¬
+    {category:"Presentations", extensions:{".ppt", ".pptx"}}, ¬
+    {category:"Images", extensions:{".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".bmp", ".svg"}}, ¬
+    {category:"Videos", extensions:{".mp4", ".mov", ".mkv", ".avi", ".wmv", ".webm"}}, ¬
+    {category:"Audio", extensions:{".mp3", ".wav", ".m4a", ".aac", ".flac"}}, ¬
+    {category:"Archives", extensions:{".zip", ".rar", ".7z", ".tar", ".gz", ".tgz"}}, ¬
+    {category:"Installers", extensions:{".dmg", ".pkg", ".msi", ".exe"}} ¬
+}
+
+property historyFile : (POSIX path of (path to home folder)) & ".downloads_organizer_history.plist"
+
+on run
+    set downloadsFolder to (POSIX path of (path to downloads folder))
+    
+    repeat
+        set userChoice to button returned of (display dialog "Downloads Organizer
+
+対象フォルダ: " & downloadsFolder & "
+
+何をしますか？" buttons {"終了", "元に戻す", "整理実行"} default button "整理実行" with title "Downloads Organizer" with icon note)
+        
+        if userChoice is "終了" then
+            exit repeat
+        else if userChoice is "整理実行" then
+            set moveCount to organizeDownloads(downloadsFolder)
+            if moveCount > 0 then
+                display notification (moveCount as text) & "件のファイルを整理しました" with title "Downloads Organizer"
+                display dialog "完了！
+
+" & moveCount & "件のファイルを整理しました。
+
+「元に戻す」で復元できます。" buttons {"OK"} default button "OK" with title "Downloads Organizer" with icon note
+            else
+                display dialog "整理するファイルがありませんでした。" buttons {"OK"} default button "OK" with title "Downloads Organizer"
+            end if
+        else if userChoice is "元に戻す" then
+            set restoredCount to undoLastOrganize()
+            if restoredCount > 0 then
+                display notification (restoredCount as text) & "件のファイルを元に戻しました" with title "Downloads Organizer"
+            end if
+        end if
+    end repeat
+end run
+
+on getCategoryForFile(fileName)
+    set lowerName to do shell script "echo " & quoted form of fileName & " | tr '[:upper:]' '[:lower:]'"
+    
+    repeat with rule in defaultRules
+        repeat with ext in (extensions of rule)
+            if lowerName ends with ext then
+                return category of rule
+            end if
+        end repeat
+    end repeat
+    
+    return missing value
+end getCategoryForFile
+
+on organizeDownloads(downloadsFolder)
+    set moveList to {}
+    set moveCount to 0
+    
+    tell application "Finder"
+        set downloadsFolderRef to POSIX file downloadsFolder as alias
+        set allFiles to every file of downloadsFolderRef
+        
+        repeat with aFile in allFiles
+            set fileName to name of aFile
+            set fileCategory to my getCategoryForFile(fileName)
+            
+            if fileCategory is not missing value then
+                set categoryFolder to downloadsFolder & fileCategory & "/"
+                
+                -- Create category folder if needed
+                do shell script "mkdir -p " & quoted form of categoryFolder
+                
+                set sourcePath to POSIX path of (aFile as alias)
+                set destPath to categoryFolder & fileName
+                
+                -- Handle collision
+                set counter to 1
+                repeat while (do shell script "test -e " & quoted form of destPath & " && echo 'exists' || echo 'no'") is "exists"
+                    set baseName to text 1 thru ((offset of "." in (reverse of characters of fileName as text)) * -1 - 1) of fileName
+                    set extPart to text ((offset of "." in (reverse of characters of fileName as text)) * -1) thru -1 of fileName
+                    set destPath to categoryFolder & baseName & " (" & counter & ")" & extPart
+                    set counter to counter + 1
+                end repeat
+                
+                -- Move file
+                try
+                    do shell script "mv " & quoted form of sourcePath & " " & quoted form of destPath
+                    set end of moveList to {sourcePath:sourcePath, destPath:destPath}
+                    set moveCount to moveCount + 1
+                end try
+            end if
+        end repeat
+    end tell
+    
+    -- Save history
+    if moveCount > 0 then
+        saveHistory(moveList)
+    end if
+    
+    return moveCount
+end organizeDownloads
+
+on saveHistory(moveList)
+    set historyContent to ""
+    repeat with moveItem in moveList
+        set historyContent to historyContent & (sourcePath of moveItem) & "|" & (destPath of moveItem) & linefeed
+    end repeat
+    do shell script "echo " & quoted form of historyContent & " > " & quoted form of historyFile
+end saveHistory
+
+on undoLastOrganize()
+    try
+        set historyContent to do shell script "cat " & quoted form of historyFile
+    on error
+        display dialog "元に戻す履歴がありません。" buttons {"OK"} default button "OK" with title "Downloads Organizer"
+        return 0
+    end try
+    
+    if historyContent is "" then
+        display dialog "元に戻す履歴がありません。" buttons {"OK"} default button "OK" with title "Downloads Organizer"
+        return 0
+    end if
+    
+    set restoredCount to 0
+    set historyLines to paragraphs of historyContent
+    
+    repeat with historyLine in historyLines
+        if historyLine is not "" then
+            set AppleScript's text item delimiters to "|"
+            set lineParts to text items of historyLine
+            set AppleScript's text item delimiters to ""
+            
+            if (count of lineParts) is 2 then
+                set originalPath to item 1 of lineParts
+                set movedPath to item 2 of lineParts
+                
+                try
+                    do shell script "mv " & quoted form of movedPath & " " & quoted form of originalPath
+                    set restoredCount to restoredCount + 1
+                end try
+            end if
+        end if
+    end repeat
+    
+    -- Clear history
+    do shell script "rm -f " & quoted form of historyFile
+    
+    return restoredCount
+end undoLastOrganize
