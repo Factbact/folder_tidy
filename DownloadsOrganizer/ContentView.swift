@@ -35,19 +35,25 @@ struct ContentView: View {
             .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 250)
         } detail: {
-            ScrollView {
+            Group {
                 switch selectedTab {
-                case 0: OrganizeView()
+                case 0:
+                    OrganizeView {
+                        selectedTab = 2
+                    }
                 case 1: PreviewView()
                 case 2: FoldersView()
                 case 3: RulesView()
                 case 4: ExclusionsView()
                 case 5: StatsView()
                 case 6: UpdateView(checker: updateChecker)
-                default: OrganizeView()
+                default:
+                    OrganizeView {
+                        selectedTab = 2
+                    }
                 }
             }
-            .frame(minWidth: 500)
+            .frame(minWidth: 500, maxWidth: .infinity, maxHeight: .infinity)
         }
         .navigationTitle("Downloads Organizer")
         .frame(minWidth: 700, minHeight: 500)
@@ -77,6 +83,7 @@ struct ContentView: View {
 // MARK: - 整理ビュー
 struct OrganizeView: View {
     @EnvironmentObject private var organizer: FileOrganizer
+    let onOpenFolders: () -> Void
     
     var body: some View {
         VStack(spacing: 24) {
@@ -102,7 +109,7 @@ struct OrganizeView: View {
                         .foregroundStyle(.orange)
                     Text("整理対象のフォルダが設定されていません")
                     Button("フォルダを追加") {
-                        // サイドバーのフォルダタブに移動するため、親ビューで処理
+                        onOpenFolders()
                     }
                     .buttonStyle(.borderedProminent)
                 }
@@ -308,6 +315,7 @@ struct PreviewView: View {
 // MARK: - フォルダ設定ビュー
 struct FoldersView: View {
     @EnvironmentObject private var organizer: FileOrganizer
+    @State private var selectedFolder: String?
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -321,6 +329,13 @@ struct FoldersView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal)
+
+            if organizer.autoOrganizeEnabled {
+                Text("監視中: \(organizer.monitoredFolderPaths.count)/\(organizer.targetFolders.count) フォルダ")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal)
+            }
             
             if organizer.targetFolders.isEmpty {
                 VStack(spacing: 12) {
@@ -336,25 +351,45 @@ struct FoldersView: View {
                 .frame(maxWidth: .infinity)
                 .padding()
             } else {
-                List {
+                List(selection: $selectedFolder) {
                     ForEach(organizer.targetFolders, id: \.self) { folder in
-                        HStack {
+                        HStack(alignment: .top, spacing: 10) {
                             Image(systemName: "folder.fill")
                                 .foregroundStyle(.blue)
-                            Text(folder)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            Spacer()
-                            
-                            Button {
-                                organizer.removeTargetFolder(path: folder)
-                            } label: {
-                                Image(systemName: "minus.circle.fill")
-                                    .foregroundStyle(.red)
+                                .padding(.top, 2)
+
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(folderName(from: folder))
+                                    .font(.headline)
+                                Text(folder)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
                             }
-                            .buttonStyle(.plain)
+
+                            Spacer(minLength: 8)
+
+                            VStack(alignment: .trailing, spacing: 6) {
+                                Text(monitorState(for: folder))
+                                    .font(.caption2)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(monitorStateColor(for: folder).opacity(0.15))
+                                    .foregroundStyle(monitorStateColor(for: folder))
+                                    .clipShape(Capsule())
+
+                                Button(role: .destructive) {
+                                    removeFolder(folder)
+                                } label: {
+                                    Label("削除", systemImage: "trash")
+                                }
+                                .buttonStyle(.borderless)
+                                .font(.caption)
+                            }
                         }
                         .padding(.vertical, 4)
+                        .tag(folder)
                     }
                 }
                 .listStyle(.inset)
@@ -367,6 +402,15 @@ struct FoldersView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
+
+                Button(role: .destructive) {
+                    removeSelectedFolder()
+                } label: {
+                    Label("選択を削除", systemImage: "trash")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .disabled(selectedFolder == nil)
                 
                 if !organizer.targetFolders.isEmpty {
                     Button { addDownloadsFolder() } label: {
@@ -391,6 +435,8 @@ struct FoldersView: View {
             for url in panel.urls {
                 _ = organizer.addTargetFolder(path: url.path)
             }
+            selectedFolder = panel.urls.last?.path
+            organizer.preview()
         }
     }
     
@@ -398,6 +444,40 @@ struct FoldersView: View {
         let downloadsPath = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Downloads").path
         _ = organizer.addTargetFolder(path: downloadsPath)
+        selectedFolder = downloadsPath
+        organizer.preview()
+    }
+
+    private func removeSelectedFolder() {
+        guard let selectedFolder else { return }
+        removeFolder(selectedFolder)
+    }
+
+    private func removeFolder(_ folder: String) {
+        organizer.removeTargetFolder(path: folder)
+        if selectedFolder == folder {
+            selectedFolder = nil
+        }
+        organizer.preview()
+    }
+
+    private func folderName(from path: String) -> String {
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        return name.isEmpty ? path : name
+    }
+
+    private func monitorState(for folder: String) -> String {
+        if !organizer.autoOrganizeEnabled {
+            return "手動整理"
+        }
+        return organizer.isFolderMonitored(path: folder) ? "監視中" : "未監視"
+    }
+
+    private func monitorStateColor(for folder: String) -> Color {
+        if !organizer.autoOrganizeEnabled {
+            return .secondary
+        }
+        return organizer.isFolderMonitored(path: folder) ? .green : .orange
     }
 }
 
@@ -417,29 +497,46 @@ struct RulesView: View {
                 .padding(.top)
             
             List {
-                ForEach(organizer.rules.keys.sorted(), id: \.self) { category in
+                ForEach(organizer.sortedRuleCategories, id: \.self) { category in
                     DisclosureGroup {
-                        if let extensions = organizer.rules[category] {
-                            ForEach(extensions, id: \.self) { ext in
-                                HStack {
-                                    Text(ext).font(.system(.body, design: .monospaced))
-                                    Spacer()
-                                    Button { organizer.removeRuleExtension(ext, from: category) } label: {
-                                        Image(systemName: "minus.circle").foregroundStyle(.red)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
+                        HStack {
+                            Text("拡張子 \(organizer.extensions(for: category).count) 件")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button(role: .destructive) {
+                                organizer.removeRuleCategory(category)
+                                organizer.preview()
+                            } label: {
+                                Label("カテゴリ削除", systemImage: "trash")
                             }
-                            
-                            HStack {
-                                TextField("拡張子を追加", text: extensionBinding(for: category))
-                                    .textFieldStyle(.roundedBorder)
-                                    .onSubmit { addExtension(to: category) }
-                                Button("追加") { addExtension(to: category) }
-                                    .buttonStyle(.bordered)
-                            }
-                            .padding(.top, 4)
+                            .buttonStyle(.borderless)
+                            .font(.caption)
+                            .disabled(organizer.sortedRuleCategories.count <= 1)
                         }
+
+                        ForEach(organizer.extensions(for: category), id: \.self) { ext in
+                            HStack {
+                                Text(ext).font(.system(.body, design: .monospaced))
+                                Spacer()
+                                Button {
+                                    organizer.removeRuleExtension(ext, from: category)
+                                    organizer.preview()
+                                } label: {
+                                    Image(systemName: "minus.circle").foregroundStyle(.red)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+
+                        HStack {
+                            TextField("拡張子を追加", text: extensionBinding(for: category))
+                                .textFieldStyle(.roundedBorder)
+                                .onSubmit { addExtension(to: category) }
+                            Button("追加") { addExtension(to: category) }
+                                .buttonStyle(.bordered)
+                        }
+                        .padding(.top, 4)
                     } label: {
                         Label(category, systemImage: "folder")
                     }
@@ -456,6 +553,7 @@ struct RulesView: View {
                             if organizer.addRuleCategory(name: newCategory, firstExtension: newExtension) {
                                 newCategory = ""
                                 newExtension = ""
+                                organizer.preview()
                             }
                         }
                         .buttonStyle(.borderedProminent)
@@ -476,6 +574,7 @@ struct RulesView: View {
         let ext = extensionInputs[category] ?? ""
         if organizer.addRuleExtension(ext, to: category) {
             extensionInputs[category] = ""
+            organizer.preview()
         }
     }
 }
@@ -504,7 +603,10 @@ struct ExclusionsView: View {
                         Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
                         Text(pattern).font(.system(.body, design: .monospaced))
                         Spacer()
-                        Button { organizer.removeExclusionPattern(pattern) } label: {
+                        Button {
+                            organizer.removeExclusionPattern(pattern)
+                            organizer.preview()
+                        } label: {
                             Image(systemName: "trash").foregroundStyle(.red)
                         }
                         .buttonStyle(.plain)
@@ -529,7 +631,10 @@ struct ExclusionsView: View {
     }
     
     private func addPattern() {
-        if organizer.addExclusionPattern(newPattern) { newPattern = "" }
+        if organizer.addExclusionPattern(newPattern) {
+            newPattern = ""
+            organizer.preview()
+        }
     }
 }
 
@@ -601,15 +706,37 @@ struct UpdateView: View {
                     Text("新しいバージョン: \(latest)")
                         .font(.headline)
                         .foregroundStyle(.blue)
-                    
-                    Button {
-                        checker.openDownloadPage()
-                    } label: {
-                        Label("ダウンロードページを開く", systemImage: "arrow.down.circle")
-                            .padding()
+
+                    if checker.isDownloading {
+                        ProgressView("ダウンロード中...")
+                            .padding(.top, 4)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
+
+                    if checker.downloadURL != nil {
+                        Button {
+                            if checker.downloadedFileURL != nil {
+                                checker.openDownloadedFile()
+                            } else {
+                                checker.downloadAndOpenUpdate()
+                            }
+                        } label: {
+                            Label(
+                                checker.downloadedFileURL != nil ? "ダウンロード済みファイルを開く" : "アプリ内でダウンロードして開く",
+                                systemImage: checker.downloadedFileURL != nil ? "folder" : "arrow.down.circle"
+                            )
+                            .padding()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .disabled(checker.isDownloading)
+                    }
+
+                    Button {
+                        checker.openReleasePage()
+                    } label: {
+                        Label("リリースページを開く", systemImage: "safari")
+                    }
+                    .buttonStyle(.bordered)
                 } else if checker.isChecking {
                     ProgressView()
                         .padding()
@@ -625,6 +752,20 @@ struct UpdateView: View {
                         Label("再確認", systemImage: "arrow.clockwise")
                     }
                     .buttonStyle(.bordered)
+                }
+
+                if let status = checker.statusMessage {
+                    Text(status)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.top, 4)
+                }
+
+                if let lastCheckedAt = checker.lastCheckedAt {
+                    Text("最終確認: \(lastCheckedAt.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
             }
             .padding()
