@@ -55,7 +55,7 @@ struct ContentView: View {
             }
             .frame(minWidth: 500, maxWidth: .infinity, maxHeight: .infinity)
         }
-        .navigationTitle("Downloads Organizer")
+        .navigationTitle("Folder Tidy")
         .frame(minWidth: 700, minHeight: 500)
         .onAppear {
             organizer.preview()
@@ -92,7 +92,7 @@ struct OrganizeView: View {
                     .font(.system(size: 64))
                     .foregroundStyle(.blue.gradient)
                 
-                Text("Downloads Organizer")
+                Text("Folder Tidy")
                     .font(.largeTitle)
                     .fontWeight(.bold)
                 

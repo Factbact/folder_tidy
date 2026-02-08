@@ -14,7 +14,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		1A0000000000000000000010 /* DownloadsOrganizer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DownloadsOrganizer.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		1A0000000000000000000010 /* Folder Tidy.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Folder Tidy.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		1A0000000000000000000011 /* DownloadsOrganizerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadsOrganizerApp.swift; sourceTree = "<group>"; };
 		1A0000000000000000000012 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		1A0000000000000000000013 /* FileOrganizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileOrganizer.swift; sourceTree = "<group>"; };
@@ -44,7 +44,7 @@
 		1A000000000000000000000F /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				1A0000000000000000000010 /* DownloadsOrganizer.app */,
+				1A0000000000000000000010 /* Folder Tidy.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -77,8 +77,8 @@
 			dependencies = (
 			);
 			name = DownloadsOrganizer;
-			productName = DownloadsOrganizer;
-			productReference = 1A0000000000000000000010 /* DownloadsOrganizer.app */;
+			productName = "Folder Tidy";
+			productReference = 1A0000000000000000000010 /* Folder Tidy.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -152,6 +152,8 @@
 				DEVELOPMENT_ASSET_PATHS = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Folder Tidy";
+				INFOPLIST_KEY_CFBundleName = "Folder Tidy";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -160,7 +162,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.DownloadsOrganizer;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = "Folder Tidy";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 			};
@@ -178,6 +180,8 @@
 				DEVELOPMENT_ASSET_PATHS = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Folder Tidy";
+				INFOPLIST_KEY_CFBundleName = "Folder Tidy";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -186,7 +190,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.DownloadsOrganizer;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = "Folder Tidy";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 			};

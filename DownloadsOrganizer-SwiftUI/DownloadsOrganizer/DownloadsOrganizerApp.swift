@@ -8,7 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main
-struct DownloadsOrganizerApp: App {
+struct FolderTidyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var organizer = FileOrganizer()
 
@@ -19,7 +19,7 @@ struct DownloadsOrganizerApp: App {
         }
         .windowResizability(.contentSize)
 
-        MenuBarExtra("Downloads Organizer", systemImage: "folder.badge.gearshape") {
+        MenuBarExtra("Folder Tidy", systemImage: "folder.badge.gearshape") {
             MenuBarContentView()
                 .environmentObject(organizer)
         }
