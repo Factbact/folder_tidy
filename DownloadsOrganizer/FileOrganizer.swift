@@ -130,7 +130,7 @@ class FileOrganizer: ObservableObject {
     }
 
     func removeTargetFolder(path: String) {
-        guard targetFolders.count > 1 else { return }
+        
         targetFolders.removeAll { $0 == path }
     }
 
@@ -688,5 +688,79 @@ class FileOrganizer: ObservableObject {
         guard !pendingMoves.isEmpty else { return }
 
         _ = organize(sendNotification: true, automatic: true)
+    }
+}
+
+// MARK: - Update Checker
+class UpdateChecker: ObservableObject {
+    @Published var updateAvailable = false
+    @Published var latestVersion: String?
+    @Published var downloadURL: URL?
+    @Published var isChecking = false
+    
+    static let currentVersion = "1.0.2"
+    private let repoOwner = "Factbact"
+    private let repoName = "folder_tidy"
+    
+    func checkForUpdates() {
+        guard !isChecking else { return }
+        isChecking = true
+        
+        let urlString = "https://api.github.com/repos/\(repoOwner)/\(repoName)/releases/latest"
+        guard let url = URL(string: urlString) else {
+            isChecking = false
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.setValue("application/vnd.github.v3+json", forHTTPHeaderField: "Accept")
+        
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                self?.isChecking = false
+                
+                guard let data = data,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let tagName = json["tag_name"] as? String else {
+                    return
+                }
+                
+                let latestVersion = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
+                self?.latestVersion = latestVersion
+                
+                if self?.isNewerVersion(latestVersion, than: UpdateChecker.currentVersion) == true {
+                    self?.updateAvailable = true
+                    
+                    if let assets = json["assets"] as? [[String: Any]],
+                       let firstAsset = assets.first,
+                       let downloadURLString = firstAsset["browser_download_url"] as? String {
+                        self?.downloadURL = URL(string: downloadURLString)
+                    }
+                }
+            }
+        }.resume()
+    }
+    
+    private func isNewerVersion(_ new: String, than current: String) -> Bool {
+        let newParts = new.split(separator: ".").compactMap { Int($0) }
+        let currentParts = current.split(separator: ".").compactMap { Int($0) }
+        
+        for i in 0..<max(newParts.count, currentParts.count) {
+            let newPart = i < newParts.count ? newParts[i] : 0
+            let currentPart = i < currentParts.count ? currentParts[i] : 0
+            
+            if newPart > currentPart { return true }
+            if newPart < currentPart { return false }
+        }
+        return false
+    }
+    
+    func openDownloadPage() {
+        if let url = downloadURL {
+            NSWorkspace.shared.open(url)
+        } else {
+            let url = URL(string: "https://github.com/\(repoOwner)/\(repoName)/releases/latest")!
+            NSWorkspace.shared.open(url)
+        }
     }
 }
