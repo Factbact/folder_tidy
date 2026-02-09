@@ -1128,6 +1128,7 @@ final class UpdateChecker: ObservableObject {
         case invalidRequest
         case missingDownloadURL
         case missingInstallTarget
+        case installFailed(String)
 
         var errorDescription: String? {
             switch self {
@@ -1137,6 +1138,8 @@ final class UpdateChecker: ObservableObject {
                 return "このリリースに配布ファイルが見つかりません"
             case .missingInstallTarget:
                 return "展開後のインストール対象が見つかりませんでした"
+            case let .installFailed(message):
+                return message
             }
         }
     }
@@ -1349,12 +1352,151 @@ final class UpdateChecker: ObservableObject {
                 NSWorkspace.shared.activateFileViewerSelecting([fileURL])
             }
         case "app":
-            statusMessage = "新しいアプリを準備しました。Finderから Applications に置き換えてください。"
-            NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+            do {
+                let installedAppURL = try installAppUpdate(from: fileURL)
+                downloadedFileURL = installedAppURL
+                phase = .ready
+                updateAvailable = false
+                acknowledgedUpdateVersion = latestVersion
+                statusMessage = "更新をインストールしました。アプリを再起動します..."
+                scheduleRelaunchAndTerminate(at: installedAppURL)
+            } catch {
+                statusMessage = "自動インストールに失敗しました。Finderで置き換えてください: \(error.localizedDescription)"
+                NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+            }
         default:
             statusMessage = "更新ファイルを保存しました: \(fileURL.lastPathComponent)"
             NSWorkspace.shared.activateFileViewerSelecting([fileURL])
         }
+    }
+
+    private func installAppUpdate(from stagedAppURL: URL) throws -> URL {
+        let destinationURL = resolveInstallDestination(for: stagedAppURL)
+
+        do {
+            try installAppWithoutPrivileges(from: stagedAppURL, to: destinationURL)
+            return destinationURL
+        } catch {
+            do {
+                try installAppWithAdministratorPrivileges(from: stagedAppURL, to: destinationURL)
+                return destinationURL
+            } catch let privilegeError {
+                throw UpdateError.installFailed("管理者権限でのインストールに失敗しました: \(privilegeError.localizedDescription)")
+            }
+        }
+    }
+
+    private func resolveInstallDestination(for stagedAppURL: URL) -> URL {
+        let runningAppURL = Bundle.main.bundleURL.standardizedFileURL
+        let appName = stagedAppURL.lastPathComponent
+        let applicationsURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        let applicationsDestination = applicationsURL.appendingPathComponent(appName, isDirectory: true)
+
+        if runningAppURL.pathExtension.lowercased() == "app",
+           runningAppURL.lastPathComponent.caseInsensitiveCompare(appName) == .orderedSame
+        {
+            return runningAppURL
+        }
+
+        if FileManager.default.fileExists(atPath: applicationsDestination.path) {
+            return applicationsDestination
+        }
+
+        if runningAppURL.path.hasPrefix("/Applications/") {
+            return applicationsDestination
+        }
+
+        return applicationsDestination
+    }
+
+    private func installAppWithoutPrivileges(from stagedAppURL: URL, to destinationURL: URL) throws {
+        let fileManager = FileManager.default
+        let destinationDirectory = destinationURL.deletingLastPathComponent()
+        try fileManager.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
+
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            do {
+                _ = try fileManager.replaceItemAt(destinationURL, withItemAt: stagedAppURL)
+            } catch {
+                try fileManager.removeItem(at: destinationURL)
+                try fileManager.copyItem(at: stagedAppURL, to: destinationURL)
+            }
+        } else {
+            try fileManager.copyItem(at: stagedAppURL, to: destinationURL)
+        }
+
+        clearQuarantineAttributeIfNeeded(at: destinationURL)
+    }
+
+    private func installAppWithAdministratorPrivileges(from stagedAppURL: URL, to destinationURL: URL) throws {
+        let destinationDirectory = destinationURL.deletingLastPathComponent().path
+        let shellCommand = [
+            "/bin/mkdir -p \(Self.shellEscaped(destinationDirectory))",
+            "/bin/rm -rf \(Self.shellEscaped(destinationURL.path))",
+            "/usr/bin/ditto \(Self.shellEscaped(stagedAppURL.path)) \(Self.shellEscaped(destinationURL.path))",
+            "/usr/bin/xattr -dr com.apple.quarantine \(Self.shellEscaped(destinationURL.path)) || true",
+        ].joined(separator: "; ")
+
+        let appleScript = "do shell script \(Self.appleScriptQuoted(shellCommand)) with administrator privileges"
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", appleScript]
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            let messageData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            let rawMessage = String(data: messageData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let message = (rawMessage?.isEmpty == false) ? rawMessage! : "管理者権限でのインストールが完了しませんでした"
+            throw UpdateError.installFailed(message)
+        }
+    }
+
+    private func clearQuarantineAttributeIfNeeded(at appURL: URL) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
+        process.arguments = ["-dr", "com.apple.quarantine", appURL.path]
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            // Ignore xattr failures; installation can proceed without it.
+        }
+    }
+
+    private func scheduleRelaunchAndTerminate(at appURL: URL) {
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let script = """
+        /bin/sleep 1
+        while /bin/kill -0 \(pid) 2>/dev/null; do /bin/sleep 0.3; done
+        /usr/bin/open \(Self.shellEscaped(appURL.path))
+        """
+
+        let launcher = Process()
+        launcher.executableURL = URL(fileURLWithPath: "/bin/sh")
+        launcher.arguments = ["-c", "\(script) >/dev/null 2>&1 &"]
+        try? launcher.run()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            NSApp.terminate(nil)
+        }
+    }
+
+    nonisolated private static func shellEscaped(_ value: String) -> String {
+        let escaped = value.replacingOccurrences(of: "'", with: "'\"'\"'")
+        return "'\(escaped)'"
+    }
+
+    nonisolated private static func appleScriptQuoted(_ value: String) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
     }
 
     nonisolated private static func makeUniqueDirectory(baseName: String, in root: URL) throws -> URL {
