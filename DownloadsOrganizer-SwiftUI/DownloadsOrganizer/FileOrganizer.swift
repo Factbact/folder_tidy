@@ -840,6 +840,17 @@ final class UpdateChecker: ObservableObject {
     @Published var lastCheckedAt: Date?
     @Published var releaseNotesPreview: String?
     @Published private(set) var phase: Phase = .idle
+    @Published private(set) var acknowledgedUpdateVersion: String?
+
+    var shouldShowUpdateBadge: Bool {
+        guard updateAvailable, let latestVersion else { return false }
+        return acknowledgedUpdateVersion != latestVersion
+    }
+
+    func acknowledgeUpdateBadge() {
+        guard let latestVersion else { return }
+        acknowledgedUpdateVersion = latestVersion
+    }
 
     static var currentVersion: String {
         if let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
@@ -924,6 +935,7 @@ final class UpdateChecker: ObservableObject {
                     }
                 } else {
                     updateAvailable = false
+                    acknowledgedUpdateVersion = nil
                     downloadURL = nil
                     downloadFileName = nil
                     phase = .idle

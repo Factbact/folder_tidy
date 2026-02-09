@@ -61,9 +61,15 @@ struct ContentView: View {
             organizer.preview()
             updateChecker.checkForUpdates()
         }
+        .onChange(of: selectedTab) { newValue in
+            if newValue == 6 {
+                updateChecker.acknowledgeUpdateBadge()
+            }
+        }
         .overlay(alignment: .topTrailing) {
-            if updateChecker.updateAvailable {
+            if updateChecker.shouldShowUpdateBadge {
                 Button {
+                    updateChecker.acknowledgeUpdateBadge()
                     selectedTab = 6
                 } label: {
                     Label("アップデートあり", systemImage: "arrow.down.circle.fill")
