@@ -820,6 +820,15 @@ class FileOrganizer: ObservableObject {
 // MARK: - Update Checker
 @MainActor
 final class UpdateChecker: ObservableObject {
+    enum Phase: String {
+        case idle
+        case checking
+        case downloading
+        case extracting
+        case ready
+        case failed
+    }
+
     @Published var updateAvailable = false
     @Published var latestVersion: String?
     @Published var downloadURL: URL?
@@ -829,6 +838,8 @@ final class UpdateChecker: ObservableObject {
     @Published var isDownloading = false
     @Published var statusMessage: String?
     @Published var lastCheckedAt: Date?
+    @Published var releaseNotesPreview: String?
+    @Published private(set) var phase: Phase = .idle
 
     static var currentVersion: String {
         if let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
@@ -840,74 +851,103 @@ final class UpdateChecker: ObservableObject {
 
     private let repoOwner = "Factbact"
     private let repoName = "folder_tidy"
+    private var releasePageURL: URL?
 
     private struct ReleaseAsset {
         let name: String
         let url: URL
     }
 
+    private struct ReleaseResponse: Decodable {
+        let tag_name: String
+        let body: String?
+        let html_url: String?
+        let assets: [ReleaseAssetResponse]
+    }
+
+    private struct ReleaseAssetResponse: Decodable {
+        let name: String
+        let browser_download_url: String
+    }
+
+    private enum UpdateError: LocalizedError {
+        case invalidRequest
+        case missingDownloadURL
+        case missingInstallTarget
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidRequest:
+                return "アップデート情報の取得先URLを生成できませんでした"
+            case .missingDownloadURL:
+                return "このリリースに配布ファイルが見つかりません"
+            case .missingInstallTarget:
+                return "展開後のインストール対象が見つかりませんでした"
+            }
+        }
+    }
+
     func checkForUpdates() {
         guard !isChecking else { return }
         isChecking = true
-        statusMessage = nil
+        phase = .checking
+        statusMessage = "最新バージョンを確認中..."
 
         Task {
             defer {
                 isChecking = false
                 lastCheckedAt = Date()
+                if phase == .checking {
+                    phase = .idle
+                }
             }
-
-            let urlString = "https://api.github.com/repos/\(repoOwner)/\(repoName)/releases/latest"
-            guard let url = URL(string: urlString) else {
-                statusMessage = "アップデート確認URLの生成に失敗しました"
-                return
-            }
-
-            var request = URLRequest(url: url)
-            request.setValue("application/vnd.github.v3+json", forHTTPHeaderField: "Accept")
-            request.timeoutInterval = 20
 
             do {
-                let (data, _) = try await URLSession.shared.data(for: request)
-                guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let tagName = json["tag_name"] as? String else {
-                    statusMessage = "アップデート情報の取得に失敗しました"
-                    return
-                }
-
-                let latest = normalizedVersionText(tagName)
+                let release = try await fetchLatestRelease()
+                let latest = normalizedVersionText(release.tag_name)
                 latestVersion = latest
+                releaseNotesPreview = summarizedReleaseNotes(from: release.body)
+                releasePageURL = release.html_url.flatMap(URL.init(string:))
                 downloadedFileURL = nil
 
-                let assets = json["assets"] as? [[String: Any]] ?? []
-                let preferredAsset = preferredAsset(from: assets)
-                downloadURL = preferredAsset?.url
-                downloadFileName = preferredAsset?.name
+                let preferred = preferredAsset(from: release.assets)
+                downloadURL = preferred?.url
+                downloadFileName = preferred?.name
 
                 if isNewerVersion(latest, than: Self.currentVersion) {
                     updateAvailable = true
-                    if preferredAsset == nil {
+                    phase = .idle
+                    if preferred == nil {
                         statusMessage = "新しいバージョンがありますが、配布ファイルが見つかりません"
+                    } else {
+                        statusMessage = "新しいバージョン \(latest) が見つかりました"
                     }
                 } else {
                     updateAvailable = false
+                    downloadURL = nil
+                    downloadFileName = nil
+                    phase = .idle
                     statusMessage = "最新バージョンです"
                 }
             } catch {
+                updateAvailable = false
+                phase = .failed
                 statusMessage = "アップデート確認に失敗しました: \(error.localizedDescription)"
             }
         }
     }
 
-    func downloadAndOpenUpdate() {
+    func downloadAndInstallUpdate() {
         guard !isDownloading else { return }
         guard let downloadURL else {
-            statusMessage = "ダウンロードURLが見つかりません"
+            phase = .failed
+            statusMessage = UpdateError.missingDownloadURL.localizedDescription
             return
         }
 
         isDownloading = true
-        statusMessage = "アップデートをダウンロード中..."
+        phase = .downloading
+        statusMessage = "更新ファイルをダウンロード中..."
 
         let preferredName = downloadFileName?.isEmpty == false ? downloadFileName! : downloadURL.lastPathComponent
 
@@ -915,37 +955,72 @@ final class UpdateChecker: ObservableObject {
             defer { isDownloading = false }
 
             do {
-                let (tempURL, _) = try await URLSession.shared.download(from: downloadURL)
+                var request = URLRequest(url: downloadURL)
+                request.timeoutInterval = 120
+                let (tempURL, _) = try await URLSession.shared.download(for: request)
                 let localFileURL = try saveDownloadedFile(tempURL: tempURL, preferredName: preferredName)
-                downloadedFileURL = localFileURL
-                statusMessage = "ダウンロード完了: \(localFileURL.lastPathComponent)"
-                NSWorkspace.shared.activateFileViewerSelecting([localFileURL])
-                NSWorkspace.shared.open(localFileURL)
+
+                if localFileURL.pathExtension.lowercased() == "zip" {
+                    phase = .extracting
+                    statusMessage = "更新ファイルを展開中..."
+                }
+
+                let installTarget = try await prepareInstallTarget(from: localFileURL)
+                downloadedFileURL = installTarget
+                phase = .ready
+                openPreparedUpdate(at: installTarget)
             } catch {
+                phase = .failed
                 statusMessage = "ダウンロードに失敗しました: \(error.localizedDescription)"
             }
         }
     }
 
+    func downloadAndOpenUpdate() {
+        downloadAndInstallUpdate()
+    }
+
     func openDownloadedFile() {
         guard let downloadedFileURL else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([downloadedFileURL])
-        NSWorkspace.shared.open(downloadedFileURL)
+        openPreparedUpdate(at: downloadedFileURL)
     }
 
     func openReleasePage() {
-        let url = URL(string: "https://github.com/\(repoOwner)/\(repoName)/releases/latest")!
+        let url = releasePageURL
+            ?? URL(string: "https://github.com/\(repoOwner)/\(repoName)/releases/latest")!
         NSWorkspace.shared.open(url)
     }
 
-    private func preferredAsset(from rawAssets: [[String: Any]]) -> ReleaseAsset? {
+    private func fetchLatestRelease() async throws -> ReleaseResponse {
+        let urlString = "https://api.github.com/repos/\(repoOwner)/\(repoName)/releases/latest"
+        guard let url = URL(string: urlString) else {
+            throw UpdateError.invalidRequest
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue("application/vnd.github.v3+json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 20
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
+            throw URLError(.badServerResponse)
+        }
+
+        return try JSONDecoder().decode(ReleaseResponse.self, from: data)
+    }
+
+    private func preferredAsset(from rawAssets: [ReleaseAssetResponse]) -> ReleaseAsset? {
         let assets: [ReleaseAsset] = rawAssets.compactMap { raw in
-            guard let name = raw["name"] as? String,
-                  let urlText = raw["browser_download_url"] as? String,
-                  let url = URL(string: urlText) else {
+            let lowerName = raw.name.lowercased()
+            if lowerName.contains("source code") {
                 return nil
             }
-            return ReleaseAsset(name: name, url: url)
+
+            guard let url = URL(string: raw.browser_download_url) else {
+                return nil
+            }
+
+            return ReleaseAsset(name: raw.name, url: url)
         }
 
         let prioritySuffixes = [".dmg", ".pkg", ".zip"]
@@ -964,10 +1039,11 @@ final class UpdateChecker: ObservableObject {
         let fileManager = FileManager.default
         let downloadsFolder = fileManager.urls(for: .downloadsDirectory, in: .userDomainMask).first
             ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
+        let updatesFolder = downloadsFolder.appendingPathComponent("Folder Tidy Updates", isDirectory: true)
 
-        try fileManager.createDirectory(at: downloadsFolder, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: updatesFolder, withIntermediateDirectories: true)
 
-        let originalDestination = downloadsFolder.appendingPathComponent(preferredName)
+        let originalDestination = updatesFolder.appendingPathComponent(preferredName)
         let baseName = originalDestination.deletingPathExtension().lastPathComponent
         let ext = originalDestination.pathExtension
 
@@ -975,12 +1051,117 @@ final class UpdateChecker: ObservableObject {
         var index = 1
         while fileManager.fileExists(atPath: destination.path) {
             let candidateName = ext.isEmpty ? "\(baseName) (\(index))" : "\(baseName) (\(index)).\(ext)"
-            destination = downloadsFolder.appendingPathComponent(candidateName)
+            destination = updatesFolder.appendingPathComponent(candidateName)
             index += 1
         }
 
         try fileManager.moveItem(at: tempURL, to: destination)
         return destination
+    }
+
+    private func prepareInstallTarget(from localFileURL: URL) async throws -> URL {
+        if localFileURL.pathExtension.lowercased() != "zip" {
+            return localFileURL
+        }
+
+        return try await Task.detached(priority: .userInitiated) {
+            let extractionRoot = localFileURL.deletingLastPathComponent()
+            let baseName = localFileURL.deletingPathExtension().lastPathComponent
+            let extractionDirectory = try Self.makeUniqueDirectory(baseName: baseName, in: extractionRoot)
+            try Self.extractZipArchive(at: localFileURL, to: extractionDirectory)
+            guard let installTarget = Self.preferredInstallTarget(in: extractionDirectory) else {
+                throw UpdateError.missingInstallTarget
+            }
+            return installTarget
+        }.value
+    }
+
+    private func openPreparedUpdate(at fileURL: URL) {
+        let fileExtension = fileURL.pathExtension.lowercased()
+        switch fileExtension {
+        case "dmg", "pkg":
+            if NSWorkspace.shared.open(fileURL) {
+                statusMessage = "インストーラーを開きました。画面の案内に従って更新してください。"
+            } else {
+                statusMessage = "インストーラーを開けませんでした。Finderでファイルを確認してください。"
+                NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+            }
+        case "app":
+            statusMessage = "新しいアプリを準備しました。Finderから Applications に置き換えてください。"
+            NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+        default:
+            statusMessage = "更新ファイルを保存しました: \(fileURL.lastPathComponent)"
+            NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+        }
+    }
+
+    nonisolated private static func makeUniqueDirectory(baseName: String, in root: URL) throws -> URL {
+        let fileManager = FileManager.default
+        var candidate = root.appendingPathComponent(baseName, isDirectory: true)
+        var index = 1
+        while fileManager.fileExists(atPath: candidate.path) {
+            candidate = root.appendingPathComponent("\(baseName) (\(index))", isDirectory: true)
+            index += 1
+        }
+        try fileManager.createDirectory(at: candidate, withIntermediateDirectories: true)
+        return candidate
+    }
+
+    nonisolated private static func extractZipArchive(at archiveURL: URL, to destinationURL: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        process.arguments = ["-x", "-k", archiveURL.path, destinationURL.path]
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            throw NSError(
+                domain: "UpdateChecker",
+                code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: "ZIPファイルの展開に失敗しました"]
+            )
+        }
+    }
+
+    nonisolated private static func preferredInstallTarget(in root: URL) -> URL? {
+        let fileManager = FileManager.default
+        guard let enumerator = fileManager.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return nil
+        }
+
+        var packageURL: URL?
+        var dmgURL: URL?
+        var fallbackURL: URL?
+
+        for case let url as URL in enumerator {
+            let ext = url.pathExtension.lowercased()
+            if ext == "app" { return url }
+            if ext == "pkg", packageURL == nil { packageURL = url }
+            if ext == "dmg", dmgURL == nil { dmgURL = url }
+            if fallbackURL == nil { fallbackURL = url }
+        }
+
+        return packageURL ?? dmgURL ?? fallbackURL
+    }
+
+    private func summarizedReleaseNotes(from rawBody: String?) -> String? {
+        guard let rawBody else { return nil }
+        let lines = rawBody
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+
+        guard !lines.isEmpty else { return nil }
+
+        let clipped = lines.prefix(6).joined(separator: "\n")
+        if clipped.count > 420 {
+            return String(clipped.prefix(420)) + "..."
+        }
+        return clipped
     }
 
     private func normalizedVersionText(_ version: String) -> String {

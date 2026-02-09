@@ -686,72 +686,111 @@ struct StatCard: View {
 // MARK: - アップデートビュー
 struct UpdateView: View {
     @ObservedObject var checker: UpdateChecker
-    
+
+    private var phaseLabel: String {
+        switch checker.phase {
+        case .idle:
+            return ""
+        case .checking:
+            return "更新を確認しています"
+        case .downloading:
+            return "更新ファイルをダウンロードしています"
+        case .extracting:
+            return "ZIPファイルを展開しています"
+        case .ready:
+            return "更新準備が完了しました"
+        case .failed:
+            return "更新処理に失敗しました"
+        }
+    }
+
     var body: some View {
         VStack(spacing: 24) {
             Text("アップデート")
                 .font(.title2)
                 .fontWeight(.semibold)
                 .padding(.top)
-            
+
             VStack(spacing: 16) {
                 Image(systemName: checker.updateAvailable ? "arrow.down.circle.fill" : "checkmark.circle.fill")
                     .font(.system(size: 64))
                     .foregroundStyle(checker.updateAvailable ? .blue : .green)
-                
+
                 Text("現在のバージョン: \(UpdateChecker.currentVersion)")
                     .font(.headline)
-                
-                if checker.updateAvailable, let latest = checker.latestVersion {
-                    Text("新しいバージョン: \(latest)")
-                        .font(.headline)
-                        .foregroundStyle(.blue)
 
-                    if checker.isDownloading {
-                        ProgressView("ダウンロード中...")
-                            .padding(.top, 4)
-                    }
+                if let latest = checker.latestVersion {
+                    Text("公開中の最新バージョン: \(latest)")
+                        .font(.subheadline)
+                        .foregroundStyle(checker.updateAvailable ? .blue : .secondary)
+                }
 
+                if checker.updateAvailable {
                     if checker.downloadURL != nil {
                         Button {
-                            if checker.downloadedFileURL != nil {
-                                checker.openDownloadedFile()
-                            } else {
-                                checker.downloadAndOpenUpdate()
-                            }
+                            checker.downloadAndInstallUpdate()
                         } label: {
                             Label(
-                                checker.downloadedFileURL != nil ? "ダウンロード済みファイルを開く" : "アプリ内でダウンロードして開く",
-                                systemImage: checker.downloadedFileURL != nil ? "folder" : "arrow.down.circle"
+                                checker.isDownloading || checker.phase == .extracting ? "更新を準備中..." : "今すぐ更新",
+                                systemImage: "arrow.down.circle"
                             )
-                            .padding()
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 8)
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
-                        .disabled(checker.isDownloading)
+                        .disabled(checker.isChecking || checker.isDownloading)
+                    } else {
+                        Text("このリリースはアプリ内更新に未対応です。")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
                     }
 
-                    Button {
-                        checker.openReleasePage()
-                    } label: {
-                        Label("リリースページを開く", systemImage: "safari")
+                    HStack(spacing: 12) {
+                        Button {
+                            checker.openReleasePage()
+                        } label: {
+                            Label("リリースページ", systemImage: "safari")
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button {
+                            checker.checkForUpdates()
+                        } label: {
+                            Label("再確認", systemImage: "arrow.clockwise")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(checker.isChecking || checker.isDownloading)
                     }
-                    .buttonStyle(.bordered)
-                } else if checker.isChecking {
-                    ProgressView()
-                        .padding()
-                    Text("確認中...")
-                        .foregroundStyle(.secondary)
                 } else {
-                    Text("最新バージョンです")
-                        .foregroundStyle(.secondary)
-                    
                     Button {
                         checker.checkForUpdates()
                     } label: {
-                        Label("再確認", systemImage: "arrow.clockwise")
+                        Label("アップデートを確認", systemImage: "arrow.clockwise")
                     }
                     .buttonStyle(.bordered)
+                    .disabled(checker.isChecking || checker.isDownloading)
+                }
+
+                if checker.isChecking || checker.isDownloading || checker.phase == .extracting {
+                    ProgressView()
+                        .padding(.top, 2)
+                    Text(phaseLabel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if checker.updateAvailable, let notes = checker.releaseNotesPreview {
+                    GroupBox("リリースノート（抜粋）") {
+                        ScrollView {
+                            Text(notes)
+                                .font(.callout)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                        .frame(maxHeight: 140)
+                    }
+                    .padding(.top, 2)
                 }
 
                 if let status = checker.statusMessage {
@@ -769,13 +808,12 @@ struct UpdateView: View {
                 }
             }
             .padding()
-            
+
             Spacer()
         }
         .padding()
     }
 }
-
 // MARK: - メニューバー
 struct MenuBarContentView: View {
     @EnvironmentObject private var organizer: FileOrganizer
