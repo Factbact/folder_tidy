@@ -1079,7 +1079,14 @@ final class UpdateChecker: ObservableObject {
     private func openPreparedUpdate(at fileURL: URL) {
         let fileExtension = fileURL.pathExtension.lowercased()
         switch fileExtension {
-        case "dmg", "pkg":
+        case "dmg":
+            if NSWorkspace.shared.open(fileURL) {
+                statusMessage = "更新ディスクイメージを開きました。表示されたウィンドウで Folder Tidy.app を Applications にドラッグしてください。"
+            } else {
+                statusMessage = "ディスクイメージを開けませんでした。Finderでファイルを確認してください。"
+                NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+            }
+        case "pkg":
             if NSWorkspace.shared.open(fileURL) {
                 statusMessage = "インストーラーを開きました。画面の案内に従って更新してください。"
             } else {

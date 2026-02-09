@@ -1,6 +1,6 @@
-# Downloads Organizer
+# Folder Tidy
 
-macOS用のダウンロードフォルダ整理アプリです。SwiftUIで作成されています。
+macOS向けのフォルダ整理アプリです。SwiftUIで作成されています。
 
 ## 機能
 
@@ -36,3 +36,40 @@ macOS用のダウンロードフォルダ整理アプリです。SwiftUIで作�
 ## ライセンス
 
 MIT License
+
+## ドラッグ&ドロップ型アップデートDMGの作成
+
+一般的なMacアプリのように「`Applications` へドラッグ」できる配布形式は、
+アプリ本体ではなく配布用 `.dmg` の作り方で実現します。
+
+### 1. 先に `.app` をビルド
+
+例:
+
+```bash
+xcodebuild -project DownloadsOrganizer.xcodeproj \
+  -scheme DownloadsOrganizer \
+  -configuration Release \
+  -derivedDataPath /tmp/FolderTidyRelease \
+  CODE_SIGNING_ALLOWED=NO build
+```
+
+生成物:
+`/tmp/FolderTidyRelease/Build/Products/Release/Folder Tidy.app`
+
+### 2. ドラッグ&ドロップDMGを生成
+
+```bash
+scripts/create_dragdrop_dmg.sh \
+  --app "/tmp/FolderTidyRelease/Build/Products/Release/Folder Tidy.app" \
+  --output "build/Folder-Tidy.dmg" \
+  --volume-name "Folder Tidy"
+```
+
+オプション:
+- `--background /path/to/background.png` を指定すると、DMGウィンドウ背景を設定できます。
+
+### 3. GitHub ReleasesにDMGを添付
+
+アプリ内アップデートはGitHub Releasesの最新アセットを参照します。
+`.dmg` を添付すると、アプリ側から開いたときにそのままドラッグ&ドロップで更新できます。
