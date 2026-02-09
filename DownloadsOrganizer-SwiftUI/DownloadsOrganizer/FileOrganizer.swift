@@ -11,6 +11,30 @@ struct FileMove: Equatable {
     let fileName: String
     let category: String
     let sourceFolderName: String
+    let classificationReason: String
+}
+
+struct SessionMoveRecord: Codable, Equatable {
+    let source: String
+    let destination: String
+}
+
+struct OrganizeSession: Codable, Equatable, Identifiable {
+    let id: String
+    let executedAt: Date
+    let automatic: Bool
+    let moves: [SessionMoveRecord]
+
+    var movedCount: Int {
+        moves.count
+    }
+}
+
+struct RuleTestResult {
+    let fileName: String
+    let category: String?
+    let reason: String
+    let excluded: Bool
 }
 
 @MainActor
@@ -49,9 +73,22 @@ class FileOrganizer: ObservableObject {
     @Published private(set) var monitoredFolderPaths: [String] = []
     @Published private(set) var currentMonthMovedCount: Int = 0
     @Published private(set) var totalMovedCount: Int = 0
+    @Published private(set) var undoSessions: [OrganizeSession] = []
+    @Published var autoOrganizeWaitSeconds: Int = 3 {
+        didSet {
+            let clamped = max(0, min(60, autoOrganizeWaitSeconds))
+            if clamped != autoOrganizeWaitSeconds {
+                autoOrganizeWaitSeconds = clamped
+                return
+            }
+            guard !isRestoringSettings else { return }
+            saveSettings()
+        }
+    }
 
     let downloadsPath: String
     private let historyURL: URL
+    private let sessionHistoryURL: URL
     private let settings = UserDefaults.standard
 
     private var monitorDebounceWorkItem: DispatchWorkItem?
@@ -72,6 +109,8 @@ class FileOrganizer: ObservableObject {
         static let exclusionPatterns = "downloadsOrganizer.exclusionPatterns"
         static let groupByMonthFolderEnabled = "downloadsOrganizer.groupByMonthFolderEnabled"
         static let customRules = "downloadsOrganizer.customRules"
+        static let ruleOrder = "downloadsOrganizer.ruleOrder"
+        static let autoOrganizeWaitSeconds = "downloadsOrganizer.autoOrganizeWaitSeconds"
         static let statsByMonth = "downloadsOrganizer.statsByMonth"
     }
 
@@ -87,20 +126,40 @@ class FileOrganizer: ObservableObject {
         "Installers": [".dmg", ".pkg", ".msi", ".exe"],
     ]
 
+    static let defaultRuleOrder: [String] = [
+        "Documents", "Text", "Spreadsheets", "Presentations", "Images", "Videos", "Audio", "Archives", "Installers",
+    ]
+
     @Published var rules: [String: [String]] = FileOrganizer.defaultRules {
         didSet {
             guard !isRestoringSettings else { return }
             rules = normalizedRules(rules)
+            normalizeRuleOrderForCurrentRules()
             saveSettings()
         }
     }
+
+    @Published private(set) var ruleOrder: [String] = FileOrganizer.defaultRuleOrder
 
     private let ignoreExtensions: Set<String> = [
         ".crdownload", ".part", ".partial", ".opdownload", ".download", ".tmp",
     ]
 
     var sortedRuleCategories: [String] {
-        rules.keys.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        let available = Set(rules.keys)
+        var ordered: [String] = []
+
+        for category in ruleOrder where available.contains(category) {
+            if !ordered.contains(category) {
+                ordered.append(category)
+            }
+        }
+
+        for category in rules.keys where !ordered.contains(category) {
+            ordered.append(category)
+        }
+
+        return ordered
     }
 
     init() {
@@ -108,8 +167,11 @@ class FileOrganizer: ObservableObject {
             .appendingPathComponent("Downloads").path
         self.historyURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".downloads_organizer_history.json")
+        self.sessionHistoryURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".downloads_organizer_sessions.json")
 
         loadSettings()
+        loadUndoSessions()
         checkUndoAvailability()
         requestNotificationPermission()
         updateMonitoringState()
@@ -184,7 +246,54 @@ class FileOrganizer: ObservableObject {
         rules[category] = extensions
     }
 
+    func canMoveRuleCategoryUp(_ category: String) -> Bool {
+        guard let index = sortedRuleCategories.firstIndex(of: category) else { return false }
+        return index > 0
+    }
+
+    func canMoveRuleCategoryDown(_ category: String) -> Bool {
+        guard let index = sortedRuleCategories.firstIndex(of: category) else { return false }
+        return index < sortedRuleCategories.count - 1
+    }
+
+    func moveRuleCategoryUp(_ category: String) {
+        var ordered = sortedRuleCategories
+        guard let index = ordered.firstIndex(of: category), index > 0 else { return }
+        ordered.swapAt(index, index - 1)
+        applyRuleCategoryOrder(ordered)
+    }
+
+    func moveRuleCategoryDown(_ category: String) {
+        var ordered = sortedRuleCategories
+        guard let index = ordered.firstIndex(of: category), index < ordered.count - 1 else { return }
+        ordered.swapAt(index, index + 1)
+        applyRuleCategoryOrder(ordered)
+    }
+
+    func testRule(for fileURL: URL) -> RuleTestResult {
+        let fileName = fileURL.lastPathComponent
+
+        if shouldExclude(fileName: fileName) {
+            return RuleTestResult(fileName: fileName, category: nil, reason: "除外ルールに一致", excluded: true)
+        }
+
+        let ext = getMatchingExtension(fileName: fileName)
+        if let ext, ignoreExtensions.contains(ext) {
+            return RuleTestResult(fileName: fileName, category: nil, reason: "一時拡張子 \(ext) のためスキップ", excluded: true)
+        }
+
+        if let decision = categoryForFile(fileURL, fileName: fileName, matchedExtension: ext) {
+            return RuleTestResult(fileName: fileName, category: decision.category, reason: decision.reason, excluded: false)
+        }
+
+        return RuleTestResult(fileName: fileName, category: nil, reason: "一致するルールがないため未分類", excluded: false)
+    }
+
     func preview() {
+        preview(minimumAgeSeconds: 0)
+    }
+
+    private func preview(minimumAgeSeconds: TimeInterval) {
         pendingMoves = []
         statusMessage = nil
         isError = false
@@ -194,6 +303,7 @@ class FileOrganizer: ObservableObject {
         var scannedFileCount = 0
         var excludedFileCount = 0
         var unclassifiedFileCount = 0
+        var waitingFileCount = 0
 
         for folderPath in targetFolders {
             let sourceFolderURL = URL(fileURLWithPath: folderPath)
@@ -206,7 +316,7 @@ class FileOrganizer: ObservableObject {
 
             guard let files = try? FileManager.default.contentsOfDirectory(
                 at: sourceFolderURL,
-                includingPropertiesForKeys: [.isRegularFileKey],
+                includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey, .creationDateKey],
                 options: [.skipsHiddenFiles]
             ) else {
                 continue
@@ -233,12 +343,17 @@ class FileOrganizer: ObservableObject {
                     continue
                 }
 
-                guard let category = categoryForFile(fileURL, fileName: fileName, matchedExtension: ext) else {
+                if minimumAgeSeconds > 0, !isFileStableForMove(fileURL, minimumAgeSeconds: minimumAgeSeconds) {
+                    waitingFileCount += 1
+                    continue
+                }
+
+                guard let decision = categoryForFile(fileURL, fileName: fileName, matchedExtension: ext) else {
                     unclassifiedFileCount += 1
                     continue
                 }
 
-                let destinationDirectory = destinationRoot.appendingPathComponent(category)
+                let destinationDirectory = destinationRoot.appendingPathComponent(decision.category)
                 var destinationURL = destinationDirectory.appendingPathComponent(fileName)
 
                 var counter = 1
@@ -251,8 +366,9 @@ class FileOrganizer: ObservableObject {
                     source: fileURL.path,
                     destination: destinationURL.path,
                     fileName: fileName,
-                    category: category,
-                    sourceFolderName: sourceFolderURL.lastPathComponent
+                    category: decision.category,
+                    sourceFolderName: sourceFolderURL.lastPathComponent,
+                    classificationReason: decision.reason
                 ))
             }
         }
@@ -271,10 +387,12 @@ class FileOrganizer: ObservableObject {
             return
         }
 
+        let waitingText = waitingFileCount > 0 ? "・待機\(waitingFileCount)" : ""
+
         if pendingMoves.isEmpty {
-            statusMessage = "\(scannedFolderCount)フォルダ / ファイル\(scannedFileCount)件を確認（整理対象0件・未分類\(unclassifiedFileCount)件）"
+            statusMessage = "\(scannedFolderCount)フォルダ / ファイル\(scannedFileCount)件を確認（整理対象0件・未分類\(unclassifiedFileCount)\(waitingText)件）"
         } else {
-            statusMessage = "\(scannedFolderCount)フォルダ / 対象\(pendingMoves.count)件（除外\(excludedFileCount)・未分類\(unclassifiedFileCount)）"
+            statusMessage = "\(scannedFolderCount)フォルダ / 対象\(pendingMoves.count)件（除外\(excludedFileCount)・未分類\(unclassifiedFileCount)\(waitingText)）"
         }
     }
 
@@ -282,7 +400,7 @@ class FileOrganizer: ObservableObject {
     func organize(sendNotification: Bool = true, automatic: Bool = false) -> Int {
         guard !pendingMoves.isEmpty else { return 0 }
 
-        var movedFiles: [[String: String]] = []
+        var movedFiles: [SessionMoveRecord] = []
         var successCount = 0
 
         for move in pendingMoves {
@@ -291,10 +409,7 @@ class FileOrganizer: ObservableObject {
                 try FileManager.default.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
                 try FileManager.default.moveItem(atPath: move.source, toPath: move.destination)
 
-                movedFiles.append([
-                    "source": move.source,
-                    "destination": move.destination,
-                ])
+                movedFiles.append(SessionMoveRecord(source: move.source, destination: move.destination))
                 successCount += 1
             } catch {
                 print("Error moving \(move.fileName): \(error)")
@@ -302,7 +417,8 @@ class FileOrganizer: ObservableObject {
         }
 
         if !movedFiles.isEmpty {
-            saveHistory(moves: movedFiles)
+            appendUndoSession(moves: movedFiles, automatic: automatic)
+            saveHistory(moves: movedFiles.map { ["source": $0.source, "destination": $0.destination] })
         }
 
         if successCount > 0 {
@@ -327,42 +443,47 @@ class FileOrganizer: ObservableObject {
     }
 
     func undo() {
+        if let latest = undoSessions.first {
+            undoSession(id: latest.id)
+            return
+        }
+
         guard let history = loadHistory(), !history.isEmpty else {
             statusMessage = "元に戻す履歴がありません"
             isError = true
             return
         }
 
-        var restoredCount = 0
-
-        for move in history.reversed() {
-            guard let source = move["source"],
-                  let destination = move["destination"] else {
-                continue
+        let moves: [SessionMoveRecord] = history.compactMap { item -> SessionMoveRecord? in
+            guard let source = item["source"], let destination = item["destination"] else {
+                return nil
             }
-
-            do {
-                if FileManager.default.fileExists(atPath: destination) &&
-                    !FileManager.default.fileExists(atPath: source)
-                {
-                    try FileManager.default.moveItem(atPath: destination, toPath: source)
-                    restoredCount += 1
-
-                    let destinationDirectory = URL(fileURLWithPath: destination).deletingLastPathComponent()
-                    if let contents = try? FileManager.default.contentsOfDirectory(atPath: destinationDirectory.path),
-                       contents.isEmpty
-                    {
-                        try? FileManager.default.removeItem(at: destinationDirectory)
-                    }
-                }
-            } catch {
-                print("Error restoring: \(error)")
-            }
+            return SessionMoveRecord(source: source, destination: destination)
         }
 
+        let restoredCount = restoreMoves(moves)
         try? FileManager.default.removeItem(at: historyURL)
 
         statusMessage = "\(restoredCount)件のファイルを元に戻しました"
+        isError = false
+        preview()
+        checkUndoAvailability()
+    }
+
+    func undoSession(id: String) {
+        guard let index = undoSessions.firstIndex(where: { $0.id == id }) else {
+            statusMessage = "指定したセッションが見つかりません"
+            isError = true
+            return
+        }
+
+        let session = undoSessions[index]
+        let restoredCount = restoreMoves(session.moves)
+        undoSessions.remove(at: index)
+        persistUndoSessions()
+        syncLegacyHistoryWithLatestSession()
+
+        statusMessage = "\(restoredCount)件のファイルをセッション履歴から元に戻しました"
         isError = false
         preview()
         checkUndoAvailability()
@@ -422,6 +543,29 @@ class FileOrganizer: ObservableObject {
         return normalized.isEmpty ? FileOrganizer.defaultRules : normalized
     }
 
+    private func normalizeRuleOrderForCurrentRules() {
+        let available = Set(rules.keys)
+        var ordered: [String] = []
+
+        for category in ruleOrder where available.contains(category) {
+            if !ordered.contains(category) {
+                ordered.append(category)
+            }
+        }
+
+        for category in rules.keys where !ordered.contains(category) {
+            ordered.append(category)
+        }
+
+        ruleOrder = ordered
+    }
+
+    private func applyRuleCategoryOrder(_ orderedCategories: [String]) {
+        ruleOrder = orderedCategories
+        normalizeRuleOrderForCurrentRules()
+        saveSettings()
+    }
+
     private func standardizedPath(_ path: String) -> String {
         URL(fileURLWithPath: path).standardizedFileURL.path
     }
@@ -446,66 +590,71 @@ class FileOrganizer: ObservableObject {
         return bestMatch
     }
 
+    private struct ClassificationDecision {
+        let category: String
+        let reason: String
+    }
+
     private func getCategoryForExtension(_ ext: String) -> String? {
-        for (category, extensions) in rules {
-            if extensions.contains(ext) {
+        for category in sortedRuleCategories {
+            if rules[category]?.contains(ext) == true {
                 return category
             }
         }
         return nil
     }
 
-    private func categoryForFile(_ fileURL: URL, fileName: String, matchedExtension: String?) -> String? {
-        // 1) 拡張子ルール（default + custom）を最優先
+    private func categoryForFile(_ fileURL: URL, fileName: String, matchedExtension: String?) -> ClassificationDecision? {
         if let matchedExtension, let category = getCategoryForExtension(matchedExtension) {
-            return category
+            return ClassificationDecision(category: category, reason: "拡張子ルール: \(matchedExtension) -> \(category)")
         }
 
-        // 2) 未分類のみ MIME/UTType でフォールバック
         return categoryByMIME(for: fileURL, fileName: fileName)
     }
 
-    private func categoryByMIME(for fileURL: URL, fileName: String) -> String? {
+    private func categoryByMIME(for fileURL: URL, fileName: String) -> ClassificationDecision? {
         let resourceType = try? fileURL.resourceValues(forKeys: [.contentTypeKey]).contentType
         let extensionType: UTType? = fileURL.pathExtension.isEmpty ? nil : UTType(filenameExtension: fileURL.pathExtension)
         let type = resourceType ?? extensionType
 
         guard let type else { return nil }
 
+        let identifier = type.identifier
+        let identifierLower = identifier.lowercased()
+
         if type.conforms(to: .image) {
-            return "Images"
+            return ClassificationDecision(category: "Images", reason: "MIMEフォールバック(UTType): \(identifier)")
         }
         if type.conforms(to: .movie) {
-            return "Videos"
+            return ClassificationDecision(category: "Videos", reason: "MIMEフォールバック(UTType): \(identifier)")
         }
         if type.conforms(to: .audio) {
-            return "Audio"
+            return ClassificationDecision(category: "Audio", reason: "MIMEフォールバック(UTType): \(identifier)")
         }
         if type.conforms(to: .text) || type.conforms(to: .pdf) {
-            return "Documents"
+            return ClassificationDecision(category: "Documents", reason: "MIMEフォールバック(UTType): \(identifier)")
         }
         if type.conforms(to: .archive) {
-            return "Archives"
+            return ClassificationDecision(category: "Archives", reason: "MIMEフォールバック(UTType): \(identifier)")
         }
 
-        let identifier = type.identifier.lowercased()
         let mimeType = type.preferredMIMEType?.lowercased()
 
         if let mimeType {
             if mimeType.hasPrefix("image/") {
-                return "Images"
+                return ClassificationDecision(category: "Images", reason: "MIMEフォールバック: \(mimeType)")
             }
             if mimeType.hasPrefix("video/") {
-                return "Videos"
+                return ClassificationDecision(category: "Videos", reason: "MIMEフォールバック: \(mimeType)")
             }
             if mimeType.hasPrefix("audio/") {
-                return "Audio"
+                return ClassificationDecision(category: "Audio", reason: "MIMEフォールバック: \(mimeType)")
             }
             if mimeType.hasPrefix("text/") || mimeType == "application/pdf" || mimeType == "application/msword" {
-                return "Documents"
+                return ClassificationDecision(category: "Documents", reason: "MIMEフォールバック: \(mimeType)")
             }
             if mimeType.hasPrefix("application/vnd"), mimeType.contains("document") {
-                return "Documents"
+                return ClassificationDecision(category: "Documents", reason: "MIMEフォールバック: \(mimeType)")
             }
 
             let archiveMIMEs: Set<String> = [
@@ -518,20 +667,20 @@ class FileOrganizer: ObservableObject {
                 "application/x-rar-compressed",
             ]
             if archiveMIMEs.contains(mimeType) {
-                return "Archives"
+                return ClassificationDecision(category: "Archives", reason: "MIMEフォールバック: \(mimeType)")
             }
         }
 
-        if identifier.contains("word") || identifier.contains("document") || identifier.contains("opendocument") {
-            return "Documents"
+        if identifierLower.contains("word") || identifierLower.contains("document") || identifierLower.contains("opendocument") {
+            return ClassificationDecision(category: "Documents", reason: "MIMEフォールバック(識別子): \(identifier)")
         }
-        if identifier.contains("zip") || identifier.contains("tar") || identifier.contains("gzip") || identifier.contains("archive") {
-            return "Archives"
+        if identifierLower.contains("zip") || identifierLower.contains("tar") || identifierLower.contains("gzip") || identifierLower.contains("archive") {
+            return ClassificationDecision(category: "Archives", reason: "MIMEフォールバック(識別子): \(identifier)")
         }
 
         let lowerName = fileName.lowercased()
         if lowerName.hasSuffix(".pages") || lowerName.hasSuffix(".numbers") || lowerName.hasSuffix(".key") {
-            return "Documents"
+            return ClassificationDecision(category: "Documents", reason: "拡張子ヒント: \(fileURL.pathExtension)")
         }
 
         return nil
@@ -559,6 +708,13 @@ class FileOrganizer: ObservableObject {
             fileName = "\(baseName) (\(index)).\(ext)"
         }
         return destinationDirectory.appendingPathComponent(fileName)
+    }
+
+    private func isFileStableForMove(_ fileURL: URL, minimumAgeSeconds: TimeInterval) -> Bool {
+        guard minimumAgeSeconds > 0 else { return true }
+        let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])
+        let referenceDate = values?.contentModificationDate ?? values?.creationDate ?? .distantPast
+        return Date().timeIntervalSince(referenceDate) >= minimumAgeSeconds
     }
 
     private func shouldExclude(fileName: String) -> Bool {
@@ -616,8 +772,85 @@ class FileOrganizer: ObservableObject {
         return history
     }
 
+    private func loadUndoSessions() {
+        if let data = try? Data(contentsOf: sessionHistoryURL),
+           let sessions = try? JSONDecoder().decode([OrganizeSession].self, from: data) {
+            undoSessions = sessions.sorted { $0.executedAt > $1.executedAt }
+        } else {
+            undoSessions = []
+        }
+
+        if undoSessions.isEmpty, let legacy = loadHistory(), !legacy.isEmpty {
+            let records = legacy.compactMap { item -> SessionMoveRecord? in
+                guard let source = item["source"], let destination = item["destination"] else {
+                    return nil
+                }
+                return SessionMoveRecord(source: source, destination: destination)
+            }
+            if !records.isEmpty {
+                undoSessions = [OrganizeSession(id: UUID().uuidString, executedAt: Date(), automatic: false, moves: records)]
+                persistUndoSessions()
+            }
+        }
+    }
+
+    private func appendUndoSession(moves: [SessionMoveRecord], automatic: Bool) {
+        let session = OrganizeSession(id: UUID().uuidString, executedAt: Date(), automatic: automatic, moves: moves)
+        undoSessions.insert(session, at: 0)
+        if undoSessions.count > 100 {
+            undoSessions = Array(undoSessions.prefix(100))
+        }
+        persistUndoSessions()
+        syncLegacyHistoryWithLatestSession()
+    }
+
+    private func restoreMoves(_ moves: [SessionMoveRecord]) -> Int {
+        var restoredCount = 0
+
+        for move in moves.reversed() {
+            do {
+                if FileManager.default.fileExists(atPath: move.destination) &&
+                    !FileManager.default.fileExists(atPath: move.source)
+                {
+                    try FileManager.default.moveItem(atPath: move.destination, toPath: move.source)
+                    restoredCount += 1
+
+                    let destinationDirectory = URL(fileURLWithPath: move.destination).deletingLastPathComponent()
+                    if let contents = try? FileManager.default.contentsOfDirectory(atPath: destinationDirectory.path),
+                       contents.isEmpty
+                    {
+                        try? FileManager.default.removeItem(at: destinationDirectory)
+                    }
+                }
+            } catch {
+                print("Error restoring: \(error)")
+            }
+        }
+
+        return restoredCount
+    }
+
+    private func persistUndoSessions() {
+        do {
+            let data = try JSONEncoder().encode(undoSessions)
+            try data.write(to: sessionHistoryURL)
+        } catch {
+            print("Failed to save session history: \(error)")
+        }
+    }
+
+    private func syncLegacyHistoryWithLatestSession() {
+        guard let latest = undoSessions.first else {
+            try? FileManager.default.removeItem(at: historyURL)
+            return
+        }
+
+        let moves = latest.moves.map { ["source": $0.source, "destination": $0.destination] }
+        saveHistory(moves: moves)
+    }
+
     private func checkUndoAvailability() {
-        canUndo = FileManager.default.fileExists(atPath: historyURL.path)
+        canUndo = !undoSessions.isEmpty || FileManager.default.fileExists(atPath: historyURL.path)
     }
 
     private func requestNotificationPermission() {
@@ -692,6 +925,9 @@ class FileOrganizer: ObservableObject {
         autoOrganizeEnabled = settings.bool(forKey: SettingsKey.autoOrganizeEnabled)
         groupByMonthFolderEnabled = settings.bool(forKey: SettingsKey.groupByMonthFolderEnabled)
 
+        let storedWaitSeconds = settings.object(forKey: SettingsKey.autoOrganizeWaitSeconds) as? Int ?? 3
+        autoOrganizeWaitSeconds = max(0, min(60, storedWaitSeconds))
+
         let loadedFolders: [String]
         if settings.object(forKey: SettingsKey.targetFolders) == nil {
             loadedFolders = [downloadsPath]
@@ -718,6 +954,10 @@ class FileOrganizer: ObservableObject {
             rules = FileOrganizer.defaultRules
         }
 
+        let loadedOrder = settings.stringArray(forKey: SettingsKey.ruleOrder) ?? FileOrganizer.defaultRuleOrder
+        ruleOrder = loadedOrder
+        normalizeRuleOrderForCurrentRules()
+
         statsByMonth = loadStatsFromSettings()
         refreshStats()
 
@@ -729,7 +969,9 @@ class FileOrganizer: ObservableObject {
         settings.set(autoOrganizeEnabled, forKey: SettingsKey.autoOrganizeEnabled)
         settings.set(exclusionPatterns, forKey: SettingsKey.exclusionPatterns)
         settings.set(groupByMonthFolderEnabled, forKey: SettingsKey.groupByMonthFolderEnabled)
+        settings.set(autoOrganizeWaitSeconds, forKey: SettingsKey.autoOrganizeWaitSeconds)
         settings.set(rules, forKey: SettingsKey.customRules)
+        settings.set(sortedRuleCategories, forKey: SettingsKey.ruleOrder)
         settings.set(statsByMonth, forKey: SettingsKey.statsByMonth)
     }
 
@@ -799,7 +1041,8 @@ class FileOrganizer: ObservableObject {
         }
 
         monitorDebounceWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: workItem)
+        let delay = max(0.3, TimeInterval(autoOrganizeWaitSeconds))
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     private func runAutoOrganize() {
@@ -810,7 +1053,7 @@ class FileOrganizer: ObservableObject {
         isAutoOrganizing = true
         defer { isAutoOrganizing = false }
 
-        preview()
+        preview(minimumAgeSeconds: TimeInterval(autoOrganizeWaitSeconds))
         guard !pendingMoves.isEmpty else { return }
 
         _ = organize(sendNotification: true, automatic: true)

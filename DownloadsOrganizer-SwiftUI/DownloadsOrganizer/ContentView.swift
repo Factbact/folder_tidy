@@ -166,6 +166,22 @@ struct OrganizeView: View {
                     Toggle("フォルダ監視で自動整理", isOn: $organizer.autoOrganizeEnabled)
                         .disabled(organizer.targetFolders.isEmpty)
                     Toggle("月別フォルダで整理 (YYYY-MM)", isOn: $organizer.groupByMonthFolderEnabled)
+
+                    HStack {
+                        Text("ダウンロード完了待ち")
+                        Spacer()
+                        Stepper(value: $organizer.autoOrganizeWaitSeconds, in: 0...60) {
+                            Text("\(organizer.autoOrganizeWaitSeconds)秒")
+                                .monospacedDigit()
+                        }
+                        .frame(width: 140, alignment: .trailing)
+                    }
+                    .font(.callout)
+
+                    Text("自動整理では更新直後のファイルを待機秒数ぶんスキップします")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     
                     HStack {
                         Circle()
@@ -271,13 +287,22 @@ struct PreviewView: View {
                             
                             Spacer()
                             Image(systemName: "arrow.right").foregroundStyle(.secondary)
-                            
-                            Text(move.category)
-                                .font(.callout)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 4)
-                                .background(colorForCategory(move.category).opacity(0.15))
-                                .clipShape(Capsule())
+
+                            VStack(alignment: .trailing, spacing: 4) {
+                                Text(move.category)
+                                    .font(.callout)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4)
+                                    .background(colorForCategory(move.category).opacity(0.15))
+                                    .clipShape(Capsule())
+
+                                Text(move.classificationReason)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.trailing)
+                                    .lineLimit(2)
+                                    .frame(maxWidth: 220, alignment: .trailing)
+                            }
                         }
                         .padding(.vertical, 4)
                     }
@@ -493,6 +518,7 @@ struct RulesView: View {
     @State private var newCategory = ""
     @State private var newExtension = ""
     @State private var extensionInputs: [String: String] = [:]
+    @State private var ruleTestResult: RuleTestResult?
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -510,6 +536,24 @@ struct RulesView: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                             Spacer()
+                            Button {
+                                organizer.moveRuleCategoryUp(category)
+                                organizer.preview()
+                            } label: {
+                                Image(systemName: "arrow.up")
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(!organizer.canMoveRuleCategoryUp(category))
+
+                            Button {
+                                organizer.moveRuleCategoryDown(category)
+                                organizer.preview()
+                            } label: {
+                                Image(systemName: "arrow.down")
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(!organizer.canMoveRuleCategoryDown(category))
+
                             Button(role: .destructive) {
                                 organizer.removeRuleCategory(category)
                                 organizer.preview()
@@ -567,6 +611,38 @@ struct RulesView: View {
                 } header: {
                     Text("カテゴリを追加")
                 }
+
+                Section {
+                    if let result = ruleTestResult {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(result.fileName)
+                                .fontWeight(.semibold)
+                            if let category = result.category {
+                                Text("判定カテゴリ: \(category)")
+                                    .font(.callout)
+                            } else {
+                                Text("判定カテゴリ: 未分類")
+                                    .font(.callout)
+                            }
+                            Text("理由: \(result.reason)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Text("ファイルを選択して現在のルール判定を確認できます")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Button {
+                        runRuleTest()
+                    } label: {
+                        Label("ルールテストを実行", systemImage: "checkmark.seal")
+                    }
+                    .buttonStyle(.bordered)
+                } header: {
+                    Text("ルールテスト")
+                }
             }
             .listStyle(.inset)
         }
@@ -581,6 +657,18 @@ struct RulesView: View {
         if organizer.addRuleExtension(ext, to: category) {
             extensionInputs[category] = ""
             organizer.preview()
+        }
+    }
+
+    private func runRuleTest() {
+        let panel = NSOpenPanel()
+        panel.title = "ルールテストするファイルを選択"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+
+        if panel.runModal() == .OK, let url = panel.url {
+            ruleTestResult = organizer.testRule(for: url)
         }
     }
 }
@@ -661,8 +749,46 @@ struct StatsView: View {
                 StatCard(icon: "folder", title: "監視フォルダ", value: "\(organizer.targetFolders.count)", subtitle: "フォルダ", color: .orange)
             }
             .padding(.horizontal)
-            
-            Spacer()
+
+            GroupBox {
+                if organizer.undoSessions.isEmpty {
+                    Text("セッション履歴はありません")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 8)
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 10) {
+                            ForEach(organizer.undoSessions) { session in
+                                HStack(alignment: .center, spacing: 12) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(session.executedAt.formatted(date: .abbreviated, time: .shortened))
+                                            .font(.subheadline)
+                                            .fontWeight(.medium)
+                                        Text("\(session.movedCount)件・\(session.automatic ? "自動整理" : "手動整理")")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Button("このセッションをUndo") {
+                                        organizer.undoSession(id: session.id)
+                                    }
+                                    .buttonStyle(.bordered)
+                                }
+                                .padding(.vertical, 4)
+                                .padding(.horizontal, 4)
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 280)
+                }
+            } label: {
+                Label("セッション履歴", systemImage: "clock.arrow.circlepath")
+            }
+            .padding(.horizontal)
+
+            Spacer(minLength: 0)
         }
         .padding()
     }
