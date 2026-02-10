@@ -61,25 +61,23 @@ struct ContentView: View {
             organizer.preview()
             updateChecker.checkForUpdates()
         }
-        .onChange(of: selectedTab) { newValue in
-            if newValue == 6 {
-                updateChecker.acknowledgeUpdateBadge()
-            }
-        }
         .overlay(alignment: .topTrailing) {
             if updateChecker.shouldShowUpdateBadge {
                 Button {
-                    updateChecker.acknowledgeUpdateBadge()
                     selectedTab = 6
                 } label: {
-                    Label("アップデートあり", systemImage: "arrow.down.circle.fill")
+                    Label(
+                        updateChecker.isUpdateInProgress ? "更新中..." : "アップデートあり",
+                        systemImage: updateChecker.isUpdateInProgress ? "arrow.triangle.2.circlepath.circle.fill" : "arrow.down.circle.fill"
+                    )
                         .font(.caption)
                         .padding(8)
-                        .background(.blue)
+                        .background(updateChecker.isUpdateInProgress ? Color.secondary : Color.blue)
                         .foregroundStyle(.white)
                         .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
+                .disabled(updateChecker.isUpdateInProgress)
                 .padding()
             }
         }

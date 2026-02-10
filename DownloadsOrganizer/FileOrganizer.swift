@@ -1083,16 +1083,13 @@ final class UpdateChecker: ObservableObject {
     @Published var lastCheckedAt: Date?
     @Published var releaseNotesPreview: String?
     @Published private(set) var phase: Phase = .idle
-    @Published private(set) var acknowledgedUpdateVersion: String?
 
     var shouldShowUpdateBadge: Bool {
-        guard updateAvailable, let latestVersion else { return false }
-        return acknowledgedUpdateVersion != latestVersion
+        updateAvailable
     }
 
-    func acknowledgeUpdateBadge() {
-        guard let latestVersion else { return }
-        acknowledgedUpdateVersion = latestVersion
+    var isUpdateInProgress: Bool {
+        isDownloading || phase == .downloading || phase == .extracting
     }
 
     static var currentVersion: String {
@@ -1149,6 +1146,7 @@ final class UpdateChecker: ObservableObject {
         isChecking = true
         phase = .checking
         statusMessage = "最新バージョンを確認中..."
+        let hadKnownUpdate = updateAvailable
 
         Task {
             defer {
@@ -1181,14 +1179,15 @@ final class UpdateChecker: ObservableObject {
                     }
                 } else {
                     updateAvailable = false
-                    acknowledgedUpdateVersion = nil
                     downloadURL = nil
                     downloadFileName = nil
                     phase = .idle
                     statusMessage = "最新バージョンです"
                 }
             } catch {
-                updateAvailable = false
+                if !hadKnownUpdate {
+                    updateAvailable = false
+                }
                 phase = .failed
                 statusMessage = "アップデート確認に失敗しました: \(error.localizedDescription)"
             }
@@ -1198,6 +1197,7 @@ final class UpdateChecker: ObservableObject {
     func downloadAndInstallUpdate() {
         guard !isDownloading else { return }
         guard let downloadURL else {
+            updateAvailable = true
             phase = .failed
             statusMessage = UpdateError.missingDownloadURL.localizedDescription
             return
@@ -1228,6 +1228,7 @@ final class UpdateChecker: ObservableObject {
                 phase = .ready
                 openPreparedUpdate(at: installTarget)
             } catch {
+                updateAvailable = true
                 phase = .failed
                 statusMessage = "ダウンロードに失敗しました: \(error.localizedDescription)"
             }
@@ -1370,7 +1371,6 @@ final class UpdateChecker: ObservableObject {
                 downloadedFileURL = installedAppURL
                 phase = .ready
                 updateAvailable = false
-                acknowledgedUpdateVersion = latestVersion
                 statusMessage = "更新をインストールしました。アプリを再起動します..."
                 scheduleRelaunchAndTerminate(at: installedAppURL)
             } catch {
@@ -1395,7 +1395,6 @@ final class UpdateChecker: ObservableObject {
                 downloadedFileURL = installedAppURL
                 phase = .ready
                 updateAvailable = false
-                acknowledgedUpdateVersion = latestVersion
                 statusMessage = "更新をインストールしました。アプリを再起動します..."
                 scheduleRelaunchAndTerminate(at: installedAppURL)
             } catch {
