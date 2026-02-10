@@ -1167,7 +1167,7 @@ final class UpdateChecker: ObservableObject {
                 releasePageURL = release.html_url.flatMap(URL.init(string:))
                 downloadedFileURL = nil
 
-                let preferred = preferredAsset(from: release.assets)
+                let preferred = preferredAsset(from: release.assets, latestVersion: latest)
                 downloadURL = preferred?.url
                 downloadFileName = preferred?.name
 
@@ -1267,7 +1267,7 @@ final class UpdateChecker: ObservableObject {
         return try JSONDecoder().decode(ReleaseResponse.self, from: data)
     }
 
-    private func preferredAsset(from rawAssets: [ReleaseAssetResponse]) -> ReleaseAsset? {
+    private func preferredAsset(from rawAssets: [ReleaseAssetResponse], latestVersion: String) -> ReleaseAsset? {
         let assets: [ReleaseAsset] = rawAssets.compactMap { raw in
             let lowerName = raw.name.lowercased()
             if lowerName.contains("source code") {
@@ -1281,11 +1281,35 @@ final class UpdateChecker: ObservableObject {
             return ReleaseAsset(name: raw.name, url: url)
         }
 
+        let normalizedLatest = normalizedVersionText(latestVersion).lowercased()
+        let compactLatest = normalizedLatest.replacingOccurrences(of: ".", with: "")
+        let versionHints = [
+            normalizedLatest,
+            "v\(normalizedLatest)",
+            normalizedLatest.replacingOccurrences(of: ".", with: "_"),
+            normalizedLatest.replacingOccurrences(of: ".", with: "-"),
+            compactLatest,
+            "v\(compactLatest)",
+        ]
+
+        func isLatestHintedAsset(_ asset: ReleaseAsset) -> Bool {
+            let haystack = "\(asset.name.lowercased()) \(asset.url.lastPathComponent.lowercased())"
+            return versionHints.contains { hint in
+                !hint.isEmpty && haystack.contains(hint)
+            }
+        }
+
         let prioritySuffixes = [".dmg", ".pkg", ".zip"]
         for suffix in prioritySuffixes {
-            if let hit = assets.first(where: { asset in
+            let candidates = assets.filter { asset in
                 asset.name.lowercased().hasSuffix(suffix) || asset.url.path.lowercased().hasSuffix(suffix)
-            }) {
+            }
+
+            if let hit = candidates.first(where: { isLatestHintedAsset($0) }) {
+                return hit
+            }
+
+            if let hit = candidates.first {
                 return hit
             }
         }
@@ -1338,11 +1362,25 @@ final class UpdateChecker: ObservableObject {
         let fileExtension = fileURL.pathExtension.lowercased()
         switch fileExtension {
         case "dmg":
-            if NSWorkspace.shared.open(fileURL) {
-                statusMessage = "更新ディスクイメージを開きました。表示されたウィンドウで Folder Tidy.app を Applications にドラッグしてください。"
-            } else {
-                statusMessage = "ディスクイメージを開けませんでした。Finderでファイルを確認してください。"
-                NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+            do {
+                phase = .extracting
+                statusMessage = "更新ディスクイメージを展開中..."
+                let stagedAppURL = try installTargetFromDiskImage(at: fileURL)
+                let installedAppURL = try installAppUpdate(from: stagedAppURL)
+                downloadedFileURL = installedAppURL
+                phase = .ready
+                updateAvailable = false
+                acknowledgedUpdateVersion = latestVersion
+                statusMessage = "更新をインストールしました。アプリを再起動します..."
+                scheduleRelaunchAndTerminate(at: installedAppURL)
+            } catch {
+                phase = .idle
+                if NSWorkspace.shared.open(fileURL) {
+                    statusMessage = "自動インストールに失敗しました。表示されたウィンドウで Folder Tidy.app を Applications にドラッグしてください: \(error.localizedDescription)"
+                } else {
+                    statusMessage = "ディスクイメージを開けませんでした。Finderでファイルを確認してください: \(error.localizedDescription)"
+                    NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+                }
             }
         case "pkg":
             if NSWorkspace.shared.open(fileURL) {
@@ -1487,6 +1525,30 @@ final class UpdateChecker: ObservableObject {
         }
     }
 
+    private func installTargetFromDiskImage(at diskImageURL: URL) throws -> URL {
+        let fileManager = FileManager.default
+        let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        let mountPoint = try Self.makeUniqueDirectory(baseName: "FolderTidyUpdateMount", in: tempRoot)
+        var mounted = false
+        defer {
+            if mounted {
+                try? Self.detachDiskImage(at: mountPoint)
+            }
+            try? fileManager.removeItem(at: mountPoint)
+        }
+
+        try Self.attachDiskImage(at: diskImageURL, to: mountPoint)
+        mounted = true
+
+        guard let appURL = Self.preferredAppBundle(in: mountPoint) else {
+            throw UpdateError.missingInstallTarget
+        }
+
+        let stagingRoot = tempRoot.appendingPathComponent("FolderTidyUpdateStage", isDirectory: true)
+        try fileManager.createDirectory(at: stagingRoot, withIntermediateDirectories: true)
+        return try Self.copyItemToUniqueLocation(appURL, in: stagingRoot)
+    }
+
     nonisolated private static func shellEscaped(_ value: String) -> String {
         let escaped = value.replacingOccurrences(of: "'", with: "'\"'\"'")
         return "'\(escaped)'"
@@ -1509,6 +1571,115 @@ final class UpdateChecker: ObservableObject {
         }
         try fileManager.createDirectory(at: candidate, withIntermediateDirectories: true)
         return candidate
+    }
+
+    nonisolated private static func copyItemToUniqueLocation(_ sourceURL: URL, in directory: URL) throws -> URL {
+        let fileManager = FileManager.default
+        let ext = sourceURL.pathExtension
+        let baseName = sourceURL.deletingPathExtension().lastPathComponent
+        var candidate = directory.appendingPathComponent(sourceURL.lastPathComponent, isDirectory: true)
+        var index = 1
+
+        while fileManager.fileExists(atPath: candidate.path) {
+            let fileName = ext.isEmpty ? "\(baseName) (\(index))" : "\(baseName) (\(index)).\(ext)"
+            candidate = directory.appendingPathComponent(fileName, isDirectory: true)
+            index += 1
+        }
+
+        try fileManager.copyItem(at: sourceURL, to: candidate)
+        return candidate
+    }
+
+    nonisolated private static func attachDiskImage(at diskImageURL: URL, to mountPoint: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+        process.arguments = [
+            "attach", diskImageURL.path,
+            "-nobrowse", "-readonly",
+            "-mountpoint", mountPoint.path,
+            "-quiet",
+        ]
+
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            let messageData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            let message = String(data: messageData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw NSError(
+                domain: "UpdateChecker",
+                code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: message?.isEmpty == false ? message! : "ディスクイメージをマウントできませんでした"]
+            )
+        }
+    }
+
+    nonisolated private static func detachDiskImage(at mountPoint: URL) throws {
+        let attempts: [[String]] = [
+            ["detach", mountPoint.path, "-quiet"],
+            ["detach", mountPoint.path, "-force", "-quiet"],
+        ]
+
+        var lastMessage = "ディスクイメージを取り外せませんでした"
+        var lastCode = -1
+        for arguments in attempts {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+            process.arguments = arguments
+            let outputPipe = Pipe()
+            process.standardOutput = outputPipe
+            process.standardError = outputPipe
+            try process.run()
+            process.waitUntilExit()
+
+            if process.terminationStatus == 0 {
+                return
+            }
+
+            lastCode = Int(process.terminationStatus)
+            let messageData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            if let message = String(data: messageData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !message.isEmpty {
+                lastMessage = message
+            }
+        }
+
+        throw NSError(
+            domain: "UpdateChecker",
+            code: lastCode,
+            userInfo: [NSLocalizedDescriptionKey: lastMessage]
+        )
+    }
+
+    nonisolated private static func preferredAppBundle(in root: URL) -> URL? {
+        let fileManager = FileManager.default
+        guard let enumerator = fileManager.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return nil
+        }
+
+        let preferredName = Bundle.main.bundleURL.lastPathComponent.lowercased()
+        var fallbackApp: URL?
+
+        for case let url as URL in enumerator {
+            guard url.pathExtension.lowercased() == "app" else { continue }
+            if url.lastPathComponent.lowercased() == preferredName {
+                return url
+            }
+            if fallbackApp == nil {
+                fallbackApp = url
+            }
+        }
+
+        return fallbackApp
     }
 
     nonisolated private static func extractZipArchive(at archiveURL: URL, to destinationURL: URL) throws {

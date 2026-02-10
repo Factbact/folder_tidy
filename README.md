@@ -73,3 +73,22 @@ scripts/create_dragdrop_dmg.sh \
 
 アプリ内アップデートはGitHub Releasesの最新アセットを参照します。
 `.dmg` を添付すると、アプリ側から開いたときにそのままドラッグ&ドロップで更新できます。
+
+## 再発防止: バージョン不一致チェック付きリリース
+
+「ファイル名は新しいのに中身が古いDMG」を防ぐため、以下の検証スクリプトを追加しています。
+
+- `scripts/verify_app_version.sh`:
+  `.app` の `CFBundleShortVersionString` が期待値と一致するか確認
+- `scripts/verify_dmg_version.sh`:
+  `.dmg` を一時マウントして中の `.app` バージョンを確認
+- `scripts/build_release_dmg.sh`:
+  Releaseビルド -> DMG作成 -> DMG内バージョン検証を一括実行
+
+例（推奨フロー）:
+
+```bash
+scripts/build_release_dmg.sh --version 1.3.1
+```
+
+このコマンドは、バージョン不一致がある場合に失敗して停止します。
